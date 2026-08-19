@@ -92,9 +92,27 @@ async function doSearch() {
   }
 }
 
-function open(book: Book) {
-  // 网络书源结果需先加入书架，这里跳转到阅读（后端在读取时自动入库）
-  router.push({ name: 'read', params: { book: String(book.id) } })
+async function open(book: Book) {
+  if (book.id) {
+    router.push({ name: 'read', params: { book: String(book.id) } })
+    return
+  }
+  // 网络书源结果需先加入书架，再跳转到阅读页
+  try {
+    const res = await fetch('/api/books/from-search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(book),
+    })
+    const data = await res.json()
+    if (data.id) {
+      router.push({ name: 'read', params: { book: String(data.id) } })
+    } else {
+      ElMessage.error(data.message || '加入书架失败')
+    }
+  } catch (e: any) {
+    ElMessage.error(e.message || '加入书架失败')
+  }
 }
 </script>
 

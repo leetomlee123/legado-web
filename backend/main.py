@@ -166,7 +166,8 @@ def list_chapters(book_id: int):
         try:
             refresh_web_chapters(dict(b))
         except Exception as e:
-            return write_msg(500, str(e))
+            # 目录刷新失败时仍返回已有章节，避免阅读页整页空白
+            print(f"[chapters] refresh book {book_id} failed: {e}")
     conn = require_db()
     rows = conn.execute(
         "SELECT id, book_id, title, idx FROM chapter WHERE book_id=? ORDER BY idx",
@@ -244,6 +245,48 @@ def get_book_detail(book_id: int):
     out["author"] = author
     out["cover"] = cover
     return jsonify(out)
+
+
+@app.post("/api/books/from-search")
+def add_from_search():
+    """把书源搜索结果加入书架，返回真实 book.id，供阅读页使用。"""
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    book_url = (body.get("bookUrl") or body.get("source_url") or body.get("sourceUrl") or "").strip()
+    try:
+        source_id = int(body.get("sourceId") or body.get("source_id") or 0)
+    except (TypeError, ValueError):
+        source_id = 0
+    if not name or not book_url:
+        return write_msg(400, "缺少书名或书籍地址")
+    if not source_id:
+        return write_msg(400, "缺少书源")
+    conn = require_db()
+    existing = conn.execute(
+        "SELECT id FROM book WHERE source_url=? AND source_id=?",
+        (book_url, source_id),
+    ).fetchone()
+    if existing:
+        return jsonify(book_json(get_book_by_id(int(existing["id"]))))
+    now = int(time.time() * 1000)
+    cur = conn.execute(
+        "INSERT INTO book (name, author, cover, intro, source_type, source_url, source_id, create_time) "
+        "VALUES (?, ?, ?, ?, 'web', ?, ?, ?)",
+        (
+            name,
+            body.get("author") or "",
+            body.get("cover") or "",
+            body.get("intro") or "",
+            book_url,
+            source_id,
+            now,
+        ),
+    )
+    conn.commit()
+    saved = get_book_by_id(int(cur.lastrowid))
+    if saved is None:
+        return write_msg(500, "加入书架失败")
+    return jsonify(book_json(saved))
 
 
 @app.post("/api/books/import/txt")
@@ -436,6 +479,9 @@ def search_all():
             )
             continue
         print(f"[search] source {sid} got {len(books)} books")
+        for b in books:
+            b["sourceId"] = sid
+            b["sourceType"] = "web"
         results.append({"sourceId": sid, "sourceName": name, "books": books})
     return jsonify(results)
 
