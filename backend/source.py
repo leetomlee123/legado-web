@@ -287,6 +287,7 @@ def extract_value(el: Tag | None, rule: str, base_url: str) -> str:
         return ""
 
     def _attr(target: Tag, attr: str) -> str:
+        attr = attr.split("##")[0].strip()  # strip ## part for attr name
         if attr in ("text", "textN", "textNodes", "ownText"):
             return target.get_text(separator="", strip=True)
         if attr == "html":
@@ -324,10 +325,10 @@ def extract_value(el: Tag | None, rule: str, base_url: str) -> str:
         return el.get_text(separator="", strip=True)
     if rule == "html":
         return "".join(str(c) for c in el.contents).strip()
+
+    # 普通 CSS 选择器 fallback
     found = safe_select_one(el, rule)
-    if found is not None:
-        return found.get_text(separator="", strip=True)
-    return ""
+    return found.get_text(separator="", strip=True) if found is not None else ""
 
 
 def crawl_search(html: str, rule: SearchRule | None, base_url: str) -> list[dict]:

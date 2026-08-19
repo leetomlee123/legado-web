@@ -421,7 +421,7 @@ def search_all():
         try:
             html = fetch_url(search_url)
         except Exception as e:
-            print(f"[search] source {sid} fetch err: {e} url={search_url!r}")
+            print(f"[search] source {sid} fetch err: {e} url={search_url}")
             results.append(
                 {"sourceId": sid, "sourceName": name, "books": [], "error": str(e)}
             )

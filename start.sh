@@ -10,7 +10,7 @@ echo "📦 安装前端依赖..."
 echo "🐍 准备 Python 虚拟环境..."
 VENV="$ROOT/backend/.venv"
 if [ ! -x "$VENV/bin/python" ]; then
-  python3 -m venv "$VENV"
+  python -m venv "$VENV"
 fi
 "$VENV/bin/pip" install -q -r "$ROOT/backend/requirements.txt"
 
