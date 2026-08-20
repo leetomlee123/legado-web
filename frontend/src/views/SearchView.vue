@@ -370,26 +370,31 @@ const completedSources = ref(0)
 let abortFn: (() => void) | null = null
 
 const isAllSelected = computed(() => {
-  return selectedSourceIds.value.length === allSources.value.length
+  const all = allSources.value || []
+  const selected = selectedSourceIds.value || []
+  return all.length > 0 && selected.length === all.length
 })
 
 const visibleSourcesCompact = computed(() => {
-  return allSources.value.slice(0, 5)
+  const list = Array.isArray(allSources.value) ? allSources.value : []
+  return list.slice(0, 5)
 })
 
 const filteredSourcesInPanel = computed(() => {
-  const q = sourceSearchInput.value.trim().toLowerCase()
-  if (!q) return allSources.value
-  return allSources.value.filter((s) => s.name.toLowerCase().includes(q))
+  const q = (sourceSearchInput.value || '').trim().toLowerCase()
+  const list = Array.isArray(allSources.value) ? allSources.value : []
+  if (!q) return list
+  return list.filter((s) => s && (s.name || '').toLowerCase().includes(q))
 })
 
 const totalBooksFound = computed(() => {
-  return results.value.reduce((acc, cur) => acc + (cur.books?.length || 0), 0)
+  if (!Array.isArray(results.value)) return 0
+  return results.value.reduce((acc, cur) => acc + (cur && Array.isArray(cur.books) ? cur.books.length : 0), 0)
 })
 
 const isAllGroupsCollapsed = computed(() => {
-  if (!results.value.length) return false
-  return results.value.every((g) => collapsedGroupIds.value.has(g.sourceId))
+  if (!results.value || !results.value.length) return false
+  return results.value.every((g) => g && collapsedGroupIds.value && collapsedGroupIds.value.has(g.sourceId))
 })
 
 // ── 智能相关度加权算法 ─────────────────────────────────────
@@ -402,7 +407,8 @@ interface ScoredBook extends Book {
 }
 
 function computeRelevance(book: Book, kw: string): { score: number; matchLevel: MatchLevel } {
-  const q = kw.trim().toLowerCase()
+  if (!book) return { score: 0, matchLevel: 'other' }
+  const q = (kw || '').trim().toLowerCase()
   if (!q) return { score: 0, matchLevel: 'other' }
 
   const name = (book.name || '').trim().toLowerCase()
@@ -445,15 +451,19 @@ function computeRelevance(book: Book, kw: string): { score: number; matchLevel: 
 
 /** 综合加权排序后的所有书籍列表 */
 const weightedBooks = computed<ScoredBook[]>(() => {
-  const kw = lastKeyword.value || keyword.value
+  const kw = (lastKeyword.value || keyword.value || '').trim()
   const list: ScoredBook[] = []
+  const groupList = Array.isArray(results.value) ? results.value : []
 
-  for (const group of results.value) {
-    for (const b of group.books || []) {
+  for (const group of groupList) {
+    if (!group) continue
+    const books = Array.isArray(group.books) ? group.books : []
+    for (const b of books) {
+      if (!b) continue
       const { score, matchLevel } = computeRelevance(b, kw)
       list.push({
         ...b,
-        sourceName: group.sourceName,
+        sourceName: group.sourceName || '未知书源',
         score,
         matchLevel,
       })
@@ -465,9 +475,12 @@ const weightedBooks = computed<ScoredBook[]>(() => {
 
 /** 分组模式下每组内部也按权重排序 */
 const sortedResultsByGroup = computed(() => {
-  const kw = lastKeyword.value || keyword.value
-  return results.value.map((group) => {
-    const sorted = [...(group.books || [])].sort((a, b) => {
+  const kw = (lastKeyword.value || keyword.value || '').trim()
+  const arr = Array.isArray(results.value) ? results.value : []
+  return arr.map((group) => {
+    if (!group) return { sourceId: 0, sourceName: '', books: [] }
+    const books = Array.isArray(group.books) ? group.books : []
+    const sorted = books.slice().sort((a, b) => {
       return computeRelevance(b, kw).score - computeRelevance(a, kw).score
     })
     return {
@@ -488,19 +501,19 @@ function toggleSelectAll() {
   if (isAllSelected.value) {
     selectedSourceIds.value = []
   } else {
-    selectedSourceIds.value = allSources.value.map((s) => s.id!)
+    selectedSourceIds.value = (allSources.value || []).map((s) => s.id!).filter(Boolean)
   }
 }
 
 function selectAllSources() {
-  selectedSourceIds.value = allSources.value.map((s) => s.id!)
+  selectedSourceIds.value = (allSources.value || []).map((s) => s.id!).filter(Boolean)
 }
 
 function invertSelectSources() {
-  const currentSet = new Set(selectedSourceIds.value)
-  selectedSourceIds.value = allSources.value
+  const currentSet = new Set(selectedSourceIds.value || [])
+  selectedSourceIds.value = (allSources.value || [])
     .map((s) => s.id!)
-    .filter((id) => !currentSet.has(id))
+    .filter((id) => id && !currentSet.has(id))
 }
 
 function clearSelectSources() {
@@ -528,11 +541,14 @@ function toggleCollapseAllGroups() {
   if (isAllGroupsCollapsed.value) {
     collapsedGroupIds.value.clear()
   } else {
-    results.value.forEach((g) => collapsedGroupIds.value.add(g.sourceId))
+    ;(results.value || []).forEach((g) => {
+      if (g && g.sourceId) collapsedGroupIds.value.add(g.sourceId)
+    })
   }
 }
 
 function handleCoverError(book: Book) {
+  if (!book) return
   failedCovers.value.add(book.uuid || book.name)
 }
 
@@ -557,7 +573,8 @@ const GRADIENTS = [
 ]
 
 function resultPlaceholderStyle(name: string): Record<string, string> {
-  const idx = name.charCodeAt(0) % GRADIENTS.length
+  const str = name || '书'
+  const idx = str.charCodeAt(0) % GRADIENTS.length
   const [from, to] = GRADIENTS[idx]
   return { background: `linear-gradient(145deg, ${from}, ${to})` }
 }
@@ -565,10 +582,13 @@ function resultPlaceholderStyle(name: string): Record<string, string> {
 async function loadSources() {
   try {
     const list = await listSources()
-    allSources.value = list.filter((s) => s.enabled)
-    selectedSourceIds.value = allSources.value.map((s) => s.id!)
+    const arr = Array.isArray(list) ? list : []
+    allSources.value = arr.filter((s) => s && s.enabled)
+    selectedSourceIds.value = allSources.value.map((s) => s.id!).filter(Boolean)
   } catch (e) {
     console.debug('获取书源列表失败:', e)
+    allSources.value = []
+    selectedSourceIds.value = []
   }
 }
 
