@@ -5,8 +5,10 @@ dist/
 
 # 运行时数据
 backend/data/
-data/*.db-shm
-data/*.db-wal
+backend/logs/
+logs/
+data/*
+!data/.gitkeep
 
 # 系统
 .DS_Store

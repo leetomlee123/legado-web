@@ -146,8 +146,9 @@ export async function batchToggleSources(ids: number[], enabled: boolean): Promi
 export async function importSourceUrl(
   url: string,
   name?: string,
+  timeout?: number,
 ): Promise<any> {
-  const res = await http.post('/sources/import', { url, name })
+  const res = await http.post('/sources/import', { url, name, timeout })
   return res
 }
 
@@ -169,6 +170,25 @@ export async function importSourceFile(file: File): Promise<any> {
 export async function getSourcePresets(): Promise<{ name: string; url: string; desc: string }[]> {
   const res = await http.get('/sources/presets')
   return res as unknown as { name: string; url: string; desc: string }[]
+}
+
+export interface SourceDelayResult {
+  sourceId: number
+  sourceName?: string
+  success: boolean
+  delay: number
+  status?: number
+  error?: string | null
+}
+
+export async function testSourceDelay(sourceId: number): Promise<SourceDelayResult> {
+  const res = await http.post(`/sources/${sourceId}/test-delay`)
+  return res as unknown as SourceDelayResult
+}
+
+export async function batchTestSourceDelay(sourceIds?: number[]): Promise<SourceDelayResult[]> {
+  const res = await http.post('/sources/batch-test-delay', { sourceIds })
+  return res as unknown as SourceDelayResult[]
 }
 
 // 多源搜索 (标准并发)
@@ -252,6 +272,9 @@ export interface AppSettings {
   proxy: string
   timeout?: number
   max_workers?: number
+  health_check_enabled?: boolean
+  health_check_interval?: number
+  auto_disable_dead?: boolean
 }
 
 export async function getSettings(): Promise<AppSettings> {
@@ -259,9 +282,68 @@ export async function getSettings(): Promise<AppSettings> {
   return res as unknown as AppSettings
 }
 
-export async function saveSettings(settings: Partial<AppSettings>): Promise<AppSettings> {
+export async function saveSettings(settings: AppSettings): Promise<AppSettings> {
   const res = await http.post('/settings', settings)
   return res as unknown as AppSettings
+}
+
+export interface ProxyTestResult {
+  ok: boolean
+  delay: number
+  ip?: string
+  status?: number
+  error?: string
+  proxy?: string
+}
+
+export async function testProxy(proxy?: string): Promise<ProxyTestResult> {
+  const res = await http.post('/settings/test-proxy', { proxy })
+  return res as unknown as ProxyTestResult
+}
+
+// ─── 书源健康度巡检 API ────────────────────────────────
+
+export interface HealthSourceResult {
+  sourceId: number
+  sourceName: string
+  category: 'healthy' | 'slow' | 'dead'
+  delay: number
+  status?: number
+  error?: string | null
+  checkTime: string
+}
+
+export interface HealthStatusRes {
+  scanning: boolean
+  enabled: boolean
+  intervalHours: number
+  autoDisableDead: boolean
+  lastScanTime: string
+  total: number
+  healthy: number
+  slow: number
+  dead: number
+  results: Record<number, HealthSourceResult>
+}
+
+export async function getHealthStatus(): Promise<HealthStatusRes> {
+  const res = await http.get('/sources/health/status')
+  return res as unknown as HealthStatusRes
+}
+
+export async function runHealthCheck(): Promise<{ ok: boolean; message: string }> {
+  const res = await http.post('/sources/health/run')
+  return res as unknown as { ok: boolean; message: string }
+}
+
+export async function disableDeadSources(): Promise<{ ok: boolean; disabledCount: number; message: string }> {
+  const res = await http.post('/sources/health/disable-dead')
+  return res as unknown as { ok: boolean; disabledCount: number; message: string }
+}
+
+export async function deleteDeadSources(): Promise<{ ok: boolean; deletedCount: number; message: string }> {
+  const res = await http.post('/sources/health/delete-dead')
+  return res as unknown as { ok: boolean; deletedCount: number; message: string }
 }
 
 // ─── 预览模式（免入书架实时抓取）────────────────────────
@@ -286,4 +368,84 @@ export async function previewToc(bookUrl: string, sourceId: number): Promise<Pre
 export async function previewContent(chapterUrl: string, sourceId: number): Promise<string> {
   const res = await http.post('/preview/content', { chapterUrl, sourceId })
   return (res as any)?.content || ''
+}
+
+// ─── 系统日志 API ──────────────────────────────────────
+
+export interface LogItem {
+  id: number
+  time: string
+  created: number
+  level: string
+  logger: string
+  message: string
+  module: string
+  line: number
+}
+
+export interface LogsResult {
+  total: number
+  items: LogItem[]
+  maxBuffer: number
+}
+
+export async function getLogs(params?: {
+  level?: string
+  keyword?: string
+  limit?: number
+  offset?: number
+}): Promise<LogsResult> {
+  const res = await http.get('/logs', { params })
+  return res as unknown as LogsResult
+}
+
+export async function clearLogs(): Promise<{ ok: boolean; message: string }> {
+  const res = await http.post('/logs/clear')
+  return res as unknown as { ok: boolean; message: string }
+}
+
+export function subscribeLogsStream(
+  onLog: (item: LogItem) => void,
+  onError?: (err: any) => void
+): () => void {
+  const controller = new AbortController()
+
+  fetch('/api/logs/stream', {
+    signal: controller.signal,
+  })
+    .then(async (response) => {
+      if (!response.ok || !response.body) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder('utf-8')
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n\n')
+        buffer = lines.pop() || ''
+
+        for (const block of lines) {
+          const trimmed = block.trim()
+          if (!trimmed.startsWith('data:')) continue
+          try {
+            const data = JSON.parse(trimmed.slice(5).trim())
+            if (data.type === 'log' && data.data) {
+              onLog(data.data)
+            }
+          } catch (e) {
+            // ignore
+          }
+        }
+      }
+    })
+    .catch((err) => {
+      if (err.name === 'AbortError') return
+      onError?.(err)
+    })
+
+  return () => controller.abort()
 }

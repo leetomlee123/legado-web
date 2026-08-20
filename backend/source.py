@@ -16,6 +16,9 @@ from curl_cffi import requests as cffi_requests
 
 from db import require_db
 from settings import get_proxy
+from logger import get_logger
+
+logger = get_logger("source")
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
@@ -55,6 +58,116 @@ def fetch_url(url: str, timeout: float = 20, base_url: str = "") -> str:
     )
     resp.raise_for_status()
     return decode_http_response(resp)
+
+
+def fetch_subscription_url(url: str, timeout: float = 30) -> tuple[str, int]:
+    """
+    获取书源订阅内容，自动测算下载耗时（ms），并针对海外 Github/Gitlab 源提供国内镜像加速回退。
+    返回 (html_or_json_text, elapsed_ms)。
+    """
+    t0 = time.perf_counter()
+    url = (url or "").strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise ValueError(f"无效的订阅 URL: {url}")
+
+    candidates = [url]
+    if "raw.githubusercontent.com" in url:
+        candidates.append(f"https://ghproxy.net/{url}")
+        candidates.append(f"https://raw.gitmirror.com/{url.replace('https://raw.githubusercontent.com/', '')}")
+
+    last_err = None
+    for cand in candidates:
+        try:
+            resp = cffi_requests.get(
+                cand,
+                impersonate="chrome120",
+                timeout=timeout,
+                headers={"User-Agent": UA},
+                allow_redirects=True,
+                proxy=get_proxy() or None,
+                verify=False,
+            )
+            if resp.status_code < 400:
+                elapsed_ms = int((time.perf_counter() - t0) * 1000)
+                return decode_http_response(resp), elapsed_ms
+        except Exception as e:
+            last_err = e
+
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    if last_err:
+        raise last_err
+    raise ValueError("下载书源订阅失败")
+
+
+def test_source_latency(
+    src_id: int,
+    name: str,
+    url: str,
+    rule_str: str,
+    timeout: float = 8,
+    proxy: str = "",
+) -> dict:
+    """探测书源响应延迟（毫秒）。"""
+    t0 = time.perf_counter()
+    target_url = (url or "").strip()
+
+    # 优先使用 searchUrl 或 bookSourceUrl
+    if rule_str:
+        try:
+            rule = parse_legado_rule(rule_str)
+            if rule and rule.search and rule.search.url:
+                spec = extract_legado_search_url_spec(rule.search.url, rule.base_url or target_url)
+                if spec:
+                    raw_u = spec.split(",", 1)[0].strip()
+                    raw_u = _replace_key(raw_u, "1")
+                    if raw_u.startswith("http://") or raw_u.startswith("https://"):
+                        target_url = raw_u
+                    elif rule.base_url:
+                        target_url = urljoin(rule.base_url, raw_u)
+        except Exception:
+            pass
+
+    if not (target_url.startswith("http://") or target_url.startswith("https://")):
+        target_url = (url or "").strip()
+
+    if not (target_url.startswith("http://") or target_url.startswith("https://")):
+        return {
+            "sourceId": src_id,
+            "sourceName": name,
+            "success": False,
+            "delay": -1,
+            "error": "无有效目标网址",
+        }
+
+    try:
+        active_proxy = proxy or get_proxy() or None
+        resp = cffi_requests.get(
+            target_url,
+            impersonate="chrome120",
+            timeout=timeout,
+            headers={"User-Agent": UA},
+            allow_redirects=True,
+            proxy=active_proxy,
+            verify=False,
+        )
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        return {
+            "sourceId": src_id,
+            "sourceName": name,
+            "success": resp.status_code < 400,
+            "delay": elapsed_ms,
+            "status": resp.status_code,
+            "error": None if resp.status_code < 400 else f"HTTP {resp.status_code}",
+        }
+    except Exception as e:
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        return {
+            "sourceId": src_id,
+            "sourceName": name,
+            "success": False,
+            "delay": elapsed_ms,
+            "error": str(e),
+        }
 
 
 @dataclass

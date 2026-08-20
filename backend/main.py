@@ -25,6 +25,13 @@ from db import data_dir, open_db, require_db, upload_dir
 from epub import import_epub_file
 from pdf import import_pdf_file
 from settings import get_proxy, set_proxy
+from logger import (
+    get_logger,
+    get_memory_logs,
+    clear_memory_logs,
+    register_log_subscriber,
+    unregister_log_subscriber,
+)
 from source import (
     crawl_book_detail,
     crawl_search,
@@ -35,6 +42,8 @@ from source import (
     refresh_web_chapters,
     split_legado_rules,
 )
+
+logger = get_logger("app")
 
 MAX_UPLOAD = 200 * 1024 * 1024
 UNSAFE_NAME = re.compile(r"[^\w.\-]", re.UNICODE)
@@ -728,10 +737,18 @@ def _process_and_import_payload(text: str, default_name: str = "") -> dict:
 @app.post("/api/sources/import/url")
 def import_source_url():
     """多种形式导入：支持网络 URL 订阅、合集页面解析、或者直接传 text。"""
+    from source import fetch_subscription_url
+    from settings import get_timeout
+
     body = request.get_json(silent=True) or {}
     url = (body.get("url") or "").strip()
     text = (body.get("text") or "").strip()
     name = (body.get("name") or "").strip()
+    try:
+        custom_timeout = int(body.get("timeout", 0))
+    except (ValueError, TypeError):
+        custom_timeout = 0
+    timeout = max(5, min(180, custom_timeout or max(30, get_timeout())))
 
     if text:
         res = _process_and_import_payload(text, name or "文本导入")
@@ -740,14 +757,83 @@ def import_source_url():
     if not url:
         return write_msg(400, "缺少订阅 URL 或内容")
 
+    logger.info("开始网络导入书源: %s (超时设定: %ds)...", url, timeout)
     try:
-        fetched = fetch_url(url)
+        fetched, elapsed_ms = fetch_subscription_url(url, timeout=timeout)
+        logger.info("书源订阅下载成功: %s, 耗时 %dms, 大小 %d 字节", url, elapsed_ms, len(fetched))
     except Exception as e:
-        return jsonify({"success": False, "failed": 1, "message": f"网络请求失败：{e}"}), 500
+        logger.warning("书源订阅下载失败 [%s]: %s", url, e)
+        return jsonify({
+            "success": False,
+            "failed": 1,
+            "message": f"网络请求超时或失败（已等待 {timeout} 秒）：{e}，建议检查代理配置或复制规则文本直接导入",
+        }), 500
 
     res = _process_and_import_payload(fetched, name or url)
     res["url"] = url
+    res["elapsedMs"] = elapsed_ms
+    res["message"] = f"下载耗时 {elapsed_ms / 1000:.1f}s，" + res.get("message", "")
     return jsonify(res)
+
+
+@app.post("/api/sources/<int:sid>/test-delay")
+def test_single_source_delay(sid: int):
+    """测试单个书源的响应延迟。"""
+    from source import test_source_latency
+    conn = require_db()
+    row = conn.execute("SELECT id, name, url, rule FROM book_source WHERE id=?", (sid,)).fetchone()
+    if not row:
+        return write_msg(404, "书源不存在")
+
+    res = test_source_latency(row["id"], row["name"], row["url"] or "", row["rule"] or "")
+    return jsonify(res)
+
+
+@app.post("/api/sources/batch-test-delay")
+def batch_test_sources_delay():
+    """并发批量测速已选或所有书源。"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from source import test_source_latency
+
+    body = request.get_json(silent=True) or {}
+    source_ids = body.get("sourceIds") or []
+    conn = require_db()
+
+    if source_ids and isinstance(source_ids, list):
+        placeholders = ",".join("?" for _ in source_ids)
+        rows = conn.execute(
+            f"SELECT id, name, url, rule FROM book_source WHERE id IN ({placeholders})",
+            source_ids,
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT id, name, url, rule FROM book_source").fetchall()
+
+    if not rows:
+        return jsonify([])
+
+    from settings import get_proxy
+    active_proxy = get_proxy()
+    results = []
+    with ThreadPoolExecutor(max_workers=min(16, len(rows))) as executor:
+        futures = {
+            executor.submit(
+                test_source_latency,
+                r["id"],
+                r["name"],
+                r["url"] or "",
+                r["rule"] or "",
+                timeout=8,
+                proxy=active_proxy,
+            ): r["id"]
+            for r in rows
+        }
+        for f in as_completed(futures):
+            try:
+                results.append(f.result())
+            except Exception as e:
+                results.append({"sourceId": futures[f], "success": False, "delay": -1, "error": str(e)})
+
+    return jsonify(results)
 
 
 @app.post("/api/sources/import/file")
@@ -793,11 +879,21 @@ def get_source_presets():
 
 @app.get("/api/settings")
 def get_settings():
-    from settings import get_proxy, get_timeout, get_max_workers
+    from settings import (
+        get_proxy,
+        get_timeout,
+        get_max_workers,
+        get_health_check_enabled,
+        get_health_check_interval,
+        get_auto_disable_dead,
+    )
     return jsonify({
         "proxy": get_proxy(),
         "timeout": get_timeout(),
         "max_workers": get_max_workers(),
+        "health_check_enabled": get_health_check_enabled(),
+        "health_check_interval": get_health_check_interval(),
+        "auto_disable_dead": get_auto_disable_dead(),
     })
 
 
@@ -810,6 +906,12 @@ def update_settings():
         set_timeout,
         get_max_workers,
         set_max_workers,
+        get_health_check_enabled,
+        set_health_check_enabled,
+        get_health_check_interval,
+        set_health_check_interval,
+        get_auto_disable_dead,
+        set_auto_disable_dead,
     )
     body = request.get_json(silent=True) or {}
     if "proxy" in body:
@@ -818,13 +920,128 @@ def update_settings():
         set_timeout(body.get("timeout"))
     if "max_workers" in body or "maxWorkers" in body:
         set_max_workers(body.get("max_workers") or body.get("maxWorkers"))
+    if "health_check_enabled" in body or "healthCheckEnabled" in body:
+        set_health_check_enabled(body.get("health_check_enabled") if "health_check_enabled" in body else body.get("healthCheckEnabled"))
+    if "health_check_interval" in body or "healthCheckInterval" in body:
+        set_health_check_interval(body.get("health_check_interval") or body.get("healthCheckInterval"))
+    if "auto_disable_dead" in body or "autoDisableDead" in body:
+        set_auto_disable_dead(body.get("auto_disable_dead") if "auto_disable_dead" in body else body.get("autoDisableDead"))
 
+    logger.info("系统设置已更新: proxy=%s, timeout=%s, max_workers=%s, health_check=%s(%sh), auto_disable_dead=%s",
+        get_proxy(), get_timeout(), get_max_workers(), get_health_check_enabled(), get_health_check_interval(), get_auto_disable_dead())
     return jsonify({
         "ok": True,
         "proxy": get_proxy(),
         "timeout": get_timeout(),
         "max_workers": get_max_workers(),
+        "health_check_enabled": get_health_check_enabled(),
+        "health_check_interval": get_health_check_interval(),
+        "auto_disable_dead": get_auto_disable_dead(),
     })
+
+
+@app.post("/api/settings/test-proxy")
+def test_proxy_route():
+    """测试指定的网络代理连通性、出口 IP 与延迟。"""
+    from settings import test_proxy_connection
+    body = request.get_json(silent=True) or {}
+    proxy = (body.get("proxy") or "").strip()
+    res = test_proxy_connection(proxy)
+    if res.get("ok"):
+        logger.info("代理连通性测试成功: 代理=%s, 出口IP=%s, 延迟=%dms", res.get("proxy"), res.get("ip"), res.get("delay"))
+    else:
+        logger.warning("代理连通性测试失败: 代理=%s, 错误=%s", res.get("proxy"), res.get("error"))
+    return jsonify(res)
+
+
+@app.get("/api/sources/health/status")
+def get_sources_health_status():
+    """获取书源健康巡检状态与最近一次扫描结果。"""
+    from health import health_manager
+    return jsonify(health_manager.get_status())
+
+
+@app.post("/api/sources/health/run")
+def trigger_sources_health_check():
+    """手动立即触发全量书源健康体检。"""
+    import threading
+    from health import health_manager
+    status = health_manager.get_status()
+    if status.get("scanning"):
+        return jsonify({"ok": False, "message": "已有正在进行的体检任务，请稍候"}), 400
+
+    threading.Thread(target=health_manager.run_scan, kwargs={"manual": True}, daemon=True).start()
+    return jsonify({"ok": True, "message": "已在后台启动全量书源健康体检"})
+
+
+@app.post("/api/sources/health/disable-dead")
+def disable_dead_sources_route():
+    """一键禁用当前体检识别到的所有失效书源。"""
+    from health import health_manager
+    count = health_manager.disable_dead_sources()
+    return jsonify({"ok": True, "disabledCount": count, "message": f"已成功禁用 {count} 个失效书源"})
+
+
+@app.post("/api/sources/health/delete-dead")
+def delete_dead_sources_route():
+    """一键删除当前体检识别到的所有失效书源。"""
+    from health import health_manager
+    count = health_manager.delete_dead_sources()
+    return jsonify({"ok": True, "deletedCount": count, "message": f"已成功删除 {count} 个失效书源"})
+
+
+@app.get("/api/logs")
+def list_logs():
+    """获取服务端内存缓冲中的结构化日志。"""
+    level = request.args.get("level", "ALL")
+    keyword = request.args.get("keyword", "")
+    try:
+        limit = min(1000, max(10, int(request.args.get("limit", 200))))
+    except ValueError:
+        limit = 200
+    try:
+        offset = max(0, int(request.args.get("offset", 0)))
+    except ValueError:
+        offset = 0
+
+    return jsonify(get_memory_logs(level=level, keyword=keyword, limit=limit, offset=offset))
+
+
+@app.post("/api/logs/clear")
+def clear_logs():
+    """清空服务端内存中的日志缓冲区。"""
+    clear_memory_logs()
+    logger.info("已清空内存日志缓冲区")
+    return jsonify({"ok": True, "message": "日志已清空"})
+
+
+@app.get("/api/logs/stream")
+def stream_logs():
+    """SSE 实时推送新产生的系统日志。"""
+    import queue
+    q = register_log_subscriber()
+
+    def generate():
+        try:
+            yield f"data: {json.dumps({'type': 'connected'}, ensure_ascii=False)}\n\n"
+            while True:
+                try:
+                    item = q.get(timeout=15.0)
+                    yield f"data: {json.dumps({'type': 'log', 'data': item}, ensure_ascii=False)}\n\n"
+                except queue.Empty:
+                    yield ": keepalive\n\n"
+        finally:
+            unregister_log_subscriber(q)
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 def _execute_single_source_search(sid: int, name: str, rule_str: str, keyword: str) -> dict:
@@ -832,6 +1049,7 @@ def _execute_single_source_search(sid: int, name: str, rule_str: str, keyword: s
     from settings import get_timeout
     rule = parse_legado_rule(rule_str)
     if rule is None or rule.search is None or not rule.search.url:
+        logger.warning("[%s (ID:%s)] 缺少有效搜索规则", name, sid)
         return {"sourceId": sid, "sourceName": name, "books": [], "error": "无搜索规则"}
 
     search_spec = rule.search.url
@@ -839,14 +1057,16 @@ def _execute_single_source_search(sid: int, name: str, rule_str: str, keyword: s
     try:
         html, final_url = fetch_search_response(search_spec, keyword, timeout=timeout, base_url=rule.base_url)
     except Exception as e:
+        logger.warning("[%s (ID:%s)] 搜索请求失败: %s", name, sid, e)
         return {"sourceId": sid, "sourceName": name, "books": [], "error": str(e)}
 
     try:
         books = crawl_search(html, rule.search, final_url)
     except Exception as e:
-        print(f"[_execute_single_source_search] crawl_search error for {name}: {e}")
+        logger.warning("[%s (ID:%s)] 规则解析失败: %s", name, sid, e)
         return {"sourceId": sid, "sourceName": name, "books": [], "error": str(e)}
 
+    logger.info("[%s (ID:%s)] 检索「%s」完成: 返回 %d 本书", name, sid, keyword, len(books))
     for b in books:
         b["sourceId"] = sid
         b["sourceType"] = "web"
@@ -878,6 +1098,8 @@ def search_stream():
             rows = conn.execute("SELECT id, name, rule FROM book_source WHERE enabled=1").fetchall()
     else:
         rows = conn.execute("SELECT id, name, rule FROM book_source WHERE enabled=1").fetchall()
+
+    logger.info("发起流式多源搜索: 关键词「%s」, 启用书源数: %d", keyword, len(rows))
 
     def generate():
         total_sources = len(rows)
@@ -916,6 +1138,7 @@ def search_stream():
             except queue.Empty:
                 break
 
+        logger.info("流式搜索完成: 关键词「%s」, 共检索到 %d 本书籍", keyword, total_books)
         yield f"data: {json.dumps({'type': 'done', 'totalBooks': total_books}, ensure_ascii=False)}\n\n"
 
     return Response(
@@ -979,7 +1202,11 @@ def search_all():
 def mount_frontend():
     candidates = [
         Path(__file__).resolve().parent.parent / "frontend" / "dist",
+        Path(__file__).resolve().parent / "dist",
         Path("frontend") / "dist",
+        Path("dist"),
+        Path("/app/dist"),
+        Path("/app/frontend/dist"),
     ]
     dist = None
     for c in candidates:
@@ -1002,7 +1229,9 @@ def mount_frontend():
 
 
 def main():
+    from health import health_manager
     open_db()
+    health_manager.start()
     mount_frontend()
     port = os.environ.get("PORT") or "8081"
     print(f"[Legado Web] 后端已启动: http://localhost:{port}")

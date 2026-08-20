@@ -4,7 +4,7 @@
     <div class="toolbar">
       <div class="toolbar-left">
         <h3 class="page-title">书源管理中心</h3>
-        <p class="desc">支持多种形式书源导入（URL 订阅、文件上传、文本粘贴、精品源一键安装），支持分页浏览与批量管理。</p>
+        <p class="desc">支持多种形式书源导入（URL 订阅、文件上传、文本粘贴、精品源一键安装），支持分页浏览、批量管理与实时测速。</p>
       </div>
       <div class="toolbar-actions">
         <el-button type="primary" class="btn-gold" @click="openImportDialog">
@@ -34,15 +34,61 @@
           placeholder="快速查找书源名称或地址..."
           clearable
           size="small"
-          style="width: 220px;"
+          style="width: 180px;"
           @input="currentPage = 1"
         />
+        <el-button size="small" :loading="testingDelay" @click="batchTestAllDelay" title="探测所有书源的连接与响应延迟">
+          ⚡ 批量测速
+        </el-button>
         <el-button size="small" :type="isManageMode ? 'primary' : 'default'" @click="toggleManageMode">
           {{ isManageMode ? '退出批量' : '批量管理' }}
         </el-button>
         <el-button size="small" @click="toggleAllGlobal(true)">全部启用</el-button>
         <el-button size="small" @click="toggleAllGlobal(false)">全部禁用</el-button>
         <el-button size="small" @click="exportAllSources">导出全部 JSON</el-button>
+      </div>
+    </div>
+
+    <!-- ── 健康度分类筛选与快捷清理栏 ────────────────────────── -->
+    <div class="health-filter-bar" v-if="sources.length">
+      <div class="health-tabs">
+        <button
+          class="h-tab"
+          :class="{ active: selectedHealthTab === 'all' }"
+          @click="selectedHealthTab = 'all'; currentPage = 1"
+        >
+          全部书源 ({{ sources.length }})
+        </button>
+        <button
+          class="h-tab healthy"
+          :class="{ active: selectedHealthTab === 'healthy' }"
+          @click="selectedHealthTab = 'healthy'; currentPage = 1"
+        >
+          🟢 健康可用 ({{ healthyCount }})
+        </button>
+        <button
+          class="h-tab slow"
+          :class="{ active: selectedHealthTab === 'slow' }"
+          @click="selectedHealthTab = 'slow'; currentPage = 1"
+        >
+          🟡 响应较慢 ({{ slowCount }})
+        </button>
+        <button
+          class="h-tab dead"
+          :class="{ active: selectedHealthTab === 'dead' }"
+          @click="selectedHealthTab = 'dead'; currentPage = 1"
+        >
+          🔴 异常/失效 ({{ deadCount }})
+        </button>
+      </div>
+
+      <div class="health-quick-actions" v-if="deadCount > 0">
+        <el-button size="small" type="warning" plain @click="handleDisableAllDead">
+          ⊘ 一键禁用全部失效源 ({{ deadCount }})
+        </el-button>
+        <el-button size="small" type="danger" plain @click="handleDeleteAllDead">
+          🗑 一键清理全部失效源 ({{ deadCount }})
+        </el-button>
       </div>
     </div>
 
@@ -53,6 +99,9 @@
           <span class="badge-select-count">已跨页选中 {{ selectedRows.length }} 个书源</span>
         </div>
         <div class="batch-dock-actions">
+          <button class="dock-action-btn btn-action-ping" :disabled="testingDelay" @click="batchTestSelectedDelay">
+            ⚡ 批量测速 ({{ selectedRows.length }})
+          </button>
           <button class="dock-action-btn btn-action-enable" @click="batchEnable(true)">
             ✓ 批量启用
           </button>
@@ -100,19 +149,34 @@
           align="center"
         />
 
-        <el-table-column prop="name" label="书源名称" min-width="160">
+        <el-table-column prop="name" label="书源名称" min-width="150">
           <template #default="{ row }">
             <span class="source-name-cell">{{ row.name }}</span>
           </template>
         </el-table-column>
 
-        <el-table-column prop="url" label="书源地址" min-width="260" show-overflow-tooltip>
+        <el-table-column prop="url" label="书源地址" min-width="240" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="source-url-cell">{{ row.url || '内置 / 动态解析' }}</span>
           </template>
         </el-table-column>
 
-        <el-table-column label="规则状态" width="100" align="center">
+        <!-- 响应延迟 / 测速状态 -->
+        <el-table-column label="响应延迟" width="115" align="center">
+          <template #default="{ row }">
+            <span
+              v-if="delayMap[row.id] !== undefined"
+              class="delay-badge"
+              :class="getDelayClass(delayMap[row.id])"
+              :title="delayErrorMap[row.id] || (delayMap[row.id] >= 0 ? `${delayMap[row.id]}ms 正常响应` : '请求超时或不可达')"
+            >
+              ⚡ {{ delayMap[row.id] >= 0 ? delayMap[row.id] + 'ms' : '超时' }}
+            </span>
+            <span v-else class="delay-badge-empty">未测速</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="规则状态" width="95" align="center">
           <template #default="{ row }">
             <span class="badge" :class="row.rule ? 'badge-configured' : 'badge-empty'">
               {{ row.rule ? '已配置' : '待完善' }}
@@ -120,7 +184,7 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="启用" width="90" align="center">
+        <el-table-column label="启用" width="85" align="center">
           <template #default="{ row }">
             <el-switch
               :model-value="isEnabled(row)"
@@ -129,8 +193,11 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="150" fixed="right" align="center">
+        <el-table-column label="操作" width="165" fixed="right" align="center">
           <template #default="{ row }">
+            <el-button link type="warning" :loading="testingSingleId === row.id" @click="testSingleDelay(row)">
+              测速
+            </el-button>
             <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
             <el-button link type="danger" @click="remove(row)">删除</el-button>
           </template>
@@ -175,9 +242,30 @@
               <span class="preset-tag" @click="importUrlInput = 'https://www.yckceo.com/yuedu/rss/json/id/864.json'">yckceo 全版本源</span>
               <span class="preset-tag" @click="importUrlInput = 'https://raw.githubusercontent.com/gedoor/legado/master/README.md'">源仓库官方订阅</span>
             </div>
+
+            <!-- 超时与延迟参数配置 -->
+            <div class="import-timeout-control">
+              <span class="timeout-label">导入下载超时：</span>
+              <el-input-number
+                v-model="importTimeout"
+                :min="5"
+                :max="180"
+                :step="5"
+                size="small"
+                style="width: 110px;"
+              />
+              <span class="timeout-unit">秒</span>
+              <div class="timeout-chips">
+                <span class="t-chip" :class="{ active: importTimeout === 15 }" @click="importTimeout = 15">15s</span>
+                <span class="t-chip" :class="{ active: importTimeout === 30 }" @click="importTimeout = 30">30s (推荐)</span>
+                <span class="t-chip" :class="{ active: importTimeout === 60 }" @click="importTimeout = 60">60s (弱网)</span>
+                <span class="t-chip" :class="{ active: importTimeout === 120 }" @click="importTimeout = 120">120s (超大合集)</span>
+              </div>
+            </div>
+
             <div class="import-action-row">
               <el-button type="primary" class="btn-gold" :loading="importing" @click="doImportByUrl">
-                开始解析并导入
+                {{ importing ? '正在下载解析 (请稍候)...' : '开始解析并导入' }}
               </el-button>
             </div>
           </div>
@@ -244,9 +332,14 @@
       </el-tabs>
     </el-dialog>
 
-    <!-- ── 手动编辑/新建书源弹窗 ────────────────────────────── -->
-    <el-dialog v-model="editVisible" :title="form.id ? '编辑书源' : '新建书源'" width="580px">
-      <el-form :model="form" label-width="80px">
+    <!-- ── 单个书源编辑/新建弹窗 ────────────────────────────── -->
+    <el-dialog
+      v-model="editVisible"
+      :title="form.id ? '编辑书源' : '新建书源'"
+      width="600px"
+      destroy-on-close
+    >
+      <el-form :model="form" label-width="84px">
         <el-form-item label="书源名称" required>
           <el-input v-model="form.name" placeholder="例如：半山人小说" />
         </el-form-item>
@@ -287,13 +380,29 @@ import {
   getSourcePresets,
   listSources,
   saveSource,
+  testSourceDelay,
+  batchTestSourceDelay,
+  getHealthStatus,
+  disableDeadSources,
+  deleteDeadSources,
+  type HealthStatusRes,
 } from '@/api'
 import type { BookSource } from '@/types'
 
-const tableRef = ref<InstanceType<typeof ElTable> | null>(null)
+const tableRef = ref<any>(null)
 const sources = ref<BookSource[]>([])
 const selectedRows = ref<BookSource[]>([])
 const isManageMode = ref(false)
+
+// 延迟映射表 id -> delay (ms, -1 为失败/超时)
+const delayMap = ref<Record<number, number>>({})
+const delayErrorMap = ref<Record<number, string>>({})
+const testingDelay = ref(false)
+const testingSingleId = ref<number | null>(null)
+
+// 健康度巡检状态
+const healthStatus = ref<HealthStatusRes | null>(null)
+const selectedHealthTab = ref<'all' | 'healthy' | 'slow' | 'dead'>('all')
 
 // 分页状态
 const currentPage = ref(1)
@@ -310,6 +419,7 @@ const importDialogVisible = ref(false)
 const activeImportTab = ref('url')
 
 const importUrlInput = ref('https://www.yckceo.com/yuedu/rss/index.html')
+const importTimeout = ref(30)
 const importTextInput = ref('')
 const presetSources = ref<{ name: string; url: string; desc: string }[]>([])
 
@@ -323,15 +433,85 @@ const form = reactive({
 
 const enabledCount = computed(() => sources.value.filter(isEnabled).length)
 
+const healthyCount = computed(() => {
+  const map = healthStatus.value?.results || {}
+  return sources.value.filter((s) => s.id && map[s.id]?.category === 'healthy').length
+})
+
+const slowCount = computed(() => {
+  const map = healthStatus.value?.results || {}
+  return sources.value.filter((s) => s.id && map[s.id]?.category === 'slow').length
+})
+
+const deadCount = computed(() => {
+  const map = healthStatus.value?.results || {}
+  return sources.value.filter((s) => s.id && map[s.id]?.category === 'dead').length
+})
+
 const filteredSources = computed(() => {
   const kw = searchFilter.value.trim().toLowerCase()
-  if (!kw) return sources.value
-  return sources.value.filter(
-    (s) =>
-      s.name.toLowerCase().includes(kw) ||
-      (s.url && s.url.toLowerCase().includes(kw))
-  )
+  const tab = selectedHealthTab.value
+  const healthMap = healthStatus.value?.results || {}
+
+  return sources.value.filter((s) => {
+    // 关键词筛选
+    if (kw) {
+      const matchName = s.name.toLowerCase().includes(kw)
+      const matchUrl = s.url && s.url.toLowerCase().includes(kw)
+      if (!matchName && !matchUrl) return false
+    }
+
+    // 健康度标签筛选
+    if (tab !== 'all') {
+      const cat = s.id ? healthMap[s.id]?.category : undefined
+      if (cat !== tab) return false
+    }
+
+    return true
+  })
 })
+
+async function loadHealth() {
+  try {
+    const res = await getHealthStatus()
+    healthStatus.value = res
+    if (res?.results) {
+      for (const [sidStr, r] of Object.entries(res.results)) {
+        const sid = Number(sidStr)
+        delayMap.value[sid] = r.delay
+        if (r.error) {
+          delayErrorMap.value[sid] = r.error
+        }
+      }
+    }
+  } catch {}
+}
+
+async function handleDisableAllDead() {
+  try {
+    await ElMessageBox.confirm('确定要一键禁用当前体检识别到的所有失效书源吗？', '提示', {
+      type: 'warning',
+      confirmButtonText: '确定禁用',
+      cancelButtonText: '取消',
+    })
+    const res = await disableDeadSources()
+    ElMessage.success(res.message || '已成功禁用失效书源')
+    await load()
+  } catch {}
+}
+
+async function handleDeleteAllDead() {
+  try {
+    await ElMessageBox.confirm('确定要一键永久删除当前体检识别到的所有失效书源吗？此操作不可撤销！', '高危操作确认', {
+      type: 'warning',
+      confirmButtonText: '确定删除',
+      cancelButtonText: '取消',
+    })
+    const res = await deleteDeadSources()
+    ElMessage.success(res.message || '已成功删除失效书源')
+    await load()
+  } catch {}
+}
 
 // 分页切片数据
 const pagedSources = computed(() => {
@@ -356,6 +536,86 @@ function toggleManageMode() {
   isManageMode.value = !isManageMode.value
   if (!isManageMode.value) {
     clearSelection()
+  }
+}
+
+function getDelayClass(delay: number) {
+  if (delay < 0) return 'delay-error'
+  if (delay <= 400) return 'delay-fast'
+  if (delay <= 1200) return 'delay-medium'
+  return 'delay-slow'
+}
+
+async function testSingleDelay(row: BookSource) {
+  if (!row.id) return
+  testingSingleId.value = row.id
+  try {
+    const res = await testSourceDelay(row.id)
+    delayMap.value[row.id] = res.delay
+    if (res.error) {
+      delayErrorMap.value[row.id] = res.error
+    } else {
+      delete delayErrorMap.value[row.id]
+    }
+    if (res.success) {
+      ElMessage.success(`[${row.name}] 测速成功: ${res.delay}ms`)
+    } else {
+      ElMessage.warning(`[${row.name}] 测速失败: ${res.error || '超时'}`)
+    }
+  } catch (e: any) {
+    delayMap.value[row.id] = -1
+    delayErrorMap.value[row.id] = e.message
+    ElMessage.error(`测速失败: ${e.message}`)
+  } finally {
+    testingSingleId.value = null
+  }
+}
+
+async function batchTestAllDelay() {
+  if (sources.value.length === 0) return
+  testingDelay.value = true
+  ElMessage.info(`正在并发测速 ${sources.value.length} 个书源...`)
+  try {
+    const results = await batchTestSourceDelay()
+    for (const r of results) {
+      delayMap.value[r.sourceId] = r.delay
+      if (r.error) {
+        delayErrorMap.value[r.sourceId] = r.error
+      }
+    }
+    const successCount = results.filter((r) => r.success).length
+    ElNotification({
+      title: '批量测速完成',
+      message: `已完成全部 ${results.length} 个书源探测，可用 ${successCount} 个`,
+      type: 'success',
+      duration: 3500,
+    })
+  } catch (e: any) {
+    ElMessage.error(e.message || '批量测速失败')
+  } finally {
+    testingDelay.value = false
+  }
+}
+
+async function batchTestSelectedDelay() {
+  if (selectedRows.value.length === 0) return
+  const ids = selectedRows.value.map((r) => r.id!).filter(Boolean)
+  testingDelay.value = true
+  ElMessage.info(`正在并发测速选中的 ${ids.length} 个书源...`)
+  try {
+    const results = await batchTestSourceDelay(ids)
+    for (const r of results) {
+      delayMap.value[r.sourceId] = r.delay
+      if (r.error) {
+        delayErrorMap.value[r.sourceId] = r.error
+      }
+    }
+    const successCount = results.filter((r) => r.success).length
+    ElMessage.success(`测速完成：${successCount}/${ids.length} 个书源响应正常`)
+  } catch (e: any) {
+    ElMessage.error(e.message || '测速失败')
+  } finally {
+    testingDelay.value = false
   }
 }
 
@@ -396,7 +656,7 @@ function showImportResult(res: any) {
       title: '书源导入成功',
       message: res.message || `成功导入 ${res.count || 1} 个书源（${res.name || '订阅导入'}）`,
       type: 'success',
-      duration: 4500,
+      duration: 5000,
     })
     importDialogVisible.value = false
     load()
@@ -413,10 +673,10 @@ async function doImportByUrl() {
   }
   importing.value = true
   try {
-    const res = await importSourceUrl(url)
+    const res = await importSourceUrl(url, undefined, importTimeout.value)
     showImportResult(res)
   } catch (e: any) {
-    ElMessage.error(e.message || '网络导入失败')
+    ElMessage.error(e.message || '网络导入超时或失败，请检查网址或代理设置')
   } finally {
     importing.value = false
   }
@@ -448,7 +708,7 @@ async function onFileSelected(file: UploadFile) {
     const res = await importSourceFile(raw)
     showImportResult(res)
   } catch (e: any) {
-    ElMessage.error(e.message || '文件上传解析失败')
+    ElMessage.error(e.message || '文件导入解析失败')
   } finally {
     importing.value = false
   }
@@ -457,7 +717,7 @@ async function onFileSelected(file: UploadFile) {
 async function installPreset(p: { name: string; url: string }) {
   importingUrl.value = p.url
   try {
-    const res = await importSourceUrl(p.url, p.name)
+    const res = await importSourceUrl(p.url, p.name, 45)
     showImportResult(res)
   } catch (e: any) {
     ElMessage.error(e.message || '预设源安装失败')
@@ -466,115 +726,124 @@ async function installPreset(p: { name: string; url: string }) {
   }
 }
 
-// ── 批量操作 ─────────────────────────────────────────────
+async function toggleEnabled(row: BookSource, val: boolean) {
+  row.enabled = val ? 1 : 0
+  try {
+    await saveSource({
+      ...row,
+      enabled: row.enabled,
+    })
+    ElMessage.success(`已${val ? '启用' : '禁用'}书源：${row.name}`)
+  } catch (e: any) {
+    ElMessage.error(e.message || '操作失败')
+    row.enabled = val ? 0 : 1
+  }
+}
 
-async function batchEnable(enabled: boolean) {
+async function batchEnable(val: boolean) {
   const ids = selectedRows.value.map((r) => r.id!).filter(Boolean)
   if (!ids.length) return
-
   try {
-    await batchToggleSources(ids, enabled)
-    ElMessage.success(`已批量${enabled ? '启用' : '禁用'} ${ids.length} 个书源`)
-    await load()
+    await batchToggleSources(ids, val)
+    ElMessage.success(`已成功批量${val ? '启用' : '禁用'} ${ids.length} 个书源`)
+    load()
     clearSelection()
   } catch (e: any) {
     ElMessage.error(e.message || '批量操作失败')
   }
 }
 
-async function batchDelete() {
-  const ids = selectedRows.value.map((r) => r.id!).filter(Boolean)
+async function toggleAllGlobal(val: boolean) {
+  const ids = sources.value.map((r) => r.id!).filter(Boolean)
   if (!ids.length) return
-
   try {
-    await ElMessageBox.confirm(
-      `确定要批量删除选中的 ${ids.length} 个书源吗？删除后不可恢复。`,
-      '批量删除书源',
-      { type: 'warning', confirmButtonText: '确定删除', cancelButtonText: '取消' }
-    )
-
-    await batchDeleteSources(ids)
-    ElMessage.success(`已成功删除 ${ids.length} 个书源`)
-    clearSelection()
-    await load()
+    await batchToggleSources(ids, val)
+    ElMessage.success(`已全部${val ? '启用' : '禁用'}所有 ${ids.length} 个书源`)
+    load()
   } catch (e: any) {
-    if (e !== 'cancel') ElMessage.error(e.message || '批量删除失败')
+    ElMessage.error(e.message || '操作失败')
   }
 }
 
-function exportSources(list: BookSource[], filename = 'legado_sources.json') {
-  if (!list.length) {
-    ElMessage.warning('没有可导出的书源')
+async function batchDelete() {
+  const ids = selectedRows.value.map((r) => r.id!).filter(Boolean)
+  if (!ids.length) return
+  try {
+    await ElMessageBox.confirm(
+      `确定要永久删除选中的 ${ids.length} 个书源吗？此操作不可撤销。`,
+      '批量删除确认',
+      {
+        confirmButtonText: '确定删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+      }
+    )
+    await batchDeleteSources(ids)
+    ElMessage.success(`已成功删除 ${ids.length} 个书源`)
+    clearSelection()
+    load()
+  } catch {}
+}
+
+async function remove(row: BookSource) {
+  if (!row.id) return
+  try {
+    await ElMessageBox.confirm(`确定要删除书源「${row.name}」吗？`, '删除书源', {
+      type: 'warning',
+    })
+    await deleteSource(row.id)
+    ElMessage.success('书源已删除')
+    load()
+  } catch {}
+}
+
+function exportSelectedSources() {
+  if (!selectedRows.value.length) return
+  exportJsonData(selectedRows.value, `legado-sources-selected-${selectedRows.value.length}.json`)
+}
+
+function exportAllSources() {
+  if (!sources.value.length) {
+    ElMessage.warning('暂无书源可导出')
     return
   }
+  exportJsonData(sources.value, `legado-sources-all-${sources.value.length}.json`)
+}
 
-  const exportData = list.map((s) => {
-    let ruleObj = null
-    try {
-      ruleObj = typeof s.rule === 'string' ? JSON.parse(s.rule) : s.rule
-    } catch {
-      ruleObj = s.rule
+function exportJsonData(data: BookSource[], filename: string) {
+  const payload = data.map((s) => {
+    let parsedRule = s.rule
+    if (typeof s.rule === 'string') {
+      try {
+        parsedRule = JSON.parse(s.rule)
+      } catch {}
     }
-
-    if (ruleObj && typeof ruleObj === 'object') {
-      return {
-        bookSourceName: s.name,
-        bookSourceUrl: s.url,
-        enabled: s.enabled !== 0,
-        ...ruleObj,
-      }
+    if (parsedRule && typeof parsedRule === 'object') {
+      return parsedRule
     }
-
     return {
       bookSourceName: s.name,
       bookSourceUrl: s.url,
-      enabled: s.enabled !== 0,
-      rule: s.rule,
+      enabled: isEnabled(s),
     }
   })
 
-  const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' })
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {
+    type: 'application/json',
+  })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
   a.download = filename
   a.click()
   URL.revokeObjectURL(url)
-  ElMessage.success(`已成功导出 ${list.length} 个书源文件`)
-}
-
-function exportSelectedSources() {
-  exportSources(selectedRows.value, `legado_selected_${selectedRows.value.length}_sources.json`)
-}
-
-function exportAllSources() {
-  exportSources(sources.value, `legado_all_${sources.value.length}_sources.json`)
-}
-
-async function toggleAllGlobal(enabled: boolean) {
-  const ids = sources.value.map((s) => s.id!).filter(Boolean)
-  if (!ids.length) return
-  try {
-    await batchToggleSources(ids, enabled)
-    ElMessage.success(enabled ? '已全部启用' : '已全部禁用')
-    await load()
-  } catch (e: any) {
-    ElMessage.error(e.message || '操作失败')
-  }
+  ElMessage.success(`成功导出 ${data.length} 个书源为 JSON 文件`)
 }
 
 async function save() {
   if (!form.name.trim() || !form.url.trim()) {
-    ElMessage.warning('请填写名称和地址')
+    ElMessage.warning('请填写书源名称和地址')
     return
-  }
-  if (form.rule.trim()) {
-    try {
-      JSON.parse(form.rule)
-    } catch {
-      ElMessage.warning('规则不是合法 JSON')
-      return
-    }
   }
   saving.value = true
   try {
@@ -583,11 +852,11 @@ async function save() {
       name: form.name.trim(),
       url: form.url.trim(),
       rule: form.rule.trim(),
-      enabled: form.enabled,
+      enabled: form.enabled ? 1 : 0,
     })
-    ElMessage.success(form.id ? '书源已更新' : '书源已添加')
+    ElMessage.success('书源已保存')
     editVisible.value = false
-    await load()
+    load()
   } catch (e: any) {
     ElMessage.error(e.message || '保存失败')
   } finally {
@@ -595,96 +864,126 @@ async function save() {
   }
 }
 
-async function toggleEnabled(row: BookSource, enabled: boolean) {
-  try {
-    await saveSource({ ...row, rule: row.rule || '', enabled })
-    row.enabled = enabled ? 1 : 0
-  } catch (e: any) {
-    ElMessage.error(e.message || '更新失败')
-  }
-}
-
-async function remove(row: BookSource) {
-  if (!row.id) return
-  try {
-    await ElMessageBox.confirm(`确定删除书源「${row.name}」？`, '删除书源', { type: 'warning' })
-    await deleteSource(row.id)
-    ElMessage.success('已删除')
-    await load()
-  } catch (e: any) {
-    if (e !== 'cancel') ElMessage.error(e.message || '删除失败')
-  }
-}
-
 onMounted(() => {
   load()
   loadPresets()
+  loadHealth()
 })
 </script>
 
 <style scoped>
 .source-page {
-  padding: 32px 24px 80px;
-  max-width: 980px;
+  padding: 24px 28px 60px;
+  max-width: 1200px;
   margin: 0 auto;
-  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* ── 健康度过滤栏 ── */
+.health-filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.health-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.h-tab {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.h-tab:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.h-tab.active {
+  background: var(--color-text-primary);
+  color: var(--color-bg);
+  border-color: var(--color-text-primary);
+}
+
+.h-tab.healthy.active {
+  background: #27c93f;
+  border-color: #27c93f;
+  color: #fff;
+}
+
+.h-tab.slow.active {
+  background: #f59e0b;
+  border-color: #f59e0b;
+  color: #fff;
+}
+
+.h-tab.dead.active {
+  background: #ef4444;
+  border-color: #ef4444;
+  color: #fff;
+}
+
+.health-quick-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .toolbar {
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  align-items: flex-start;
   gap: 16px;
-  margin-bottom: 20px;
 }
 
 .page-title {
-  margin: 0;
-  font-size: 24px;
+  font-size: 22px;
   font-weight: 700;
   color: var(--color-text-primary);
+  margin: 0 0 4px;
 }
 
 .desc {
+  font-size: 13px;
   color: var(--color-text-secondary);
-  margin: 6px 0 0;
-  font-size: 13.5px;
-  line-height: 1.5;
+  margin: 0;
 }
 
 .toolbar-actions {
   display: flex;
+  align-items: center;
   gap: 10px;
-  flex-shrink: 0;
-}
-
-.btn-gold {
-  background: var(--color-accent);
-  border-color: var(--color-accent);
-  color: #fff;
-}
-
-.btn-gold:hover {
-  background: var(--color-accent-light);
-  border-color: var(--color-accent-light);
 }
 
 .btn-icon {
-  margin-right: 6px;
+  margin-right: 5px;
 }
 
-/* ─── 子控制栏 ────────────────────────────────────────────── */
+/* 子控制条 */
 .source-sub-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px;
-  padding: 10px 16px;
   background: var(--color-surface);
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-md);
-  margin-bottom: 16px;
+  padding: 10px 16px;
+  box-shadow: var(--shadow-xs);
 }
 
 .source-stat {
@@ -692,118 +991,114 @@ onMounted(() => {
   color: var(--color-text-secondary);
 }
 
-.text-success {
-  color: #52c41a;
-}
-
 .source-filter-tools {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
   gap: 8px;
 }
 
-/* ─── 批量操作悬浮 Dock ──────────────────────────────────── */
+/* 延迟 Badge */
+.delay-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 10px;
+}
+.delay-badge.delay-fast {
+  background: rgba(39, 201, 63, 0.15);
+  color: #27c93f;
+}
+.delay-badge.delay-medium {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+}
+.delay-badge.delay-slow {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+}
+.delay-badge.delay-error {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+}
+.delay-badge-empty {
+  font-size: 11.5px;
+  color: var(--color-text-muted);
+}
+
+/* 悬浮批量 Dock */
 .batch-action-dock {
   position: sticky;
-  top: 16px;
-  z-index: 50;
+  top: 72px;
+  z-index: 100;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px;
-  padding: 12px 18px;
-  background: var(--color-surface);
-  border: 1.5px solid var(--color-accent);
-  border-radius: var(--radius-md);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
-  margin-bottom: 16px;
-}
-
-.badge-select-count {
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--color-accent);
+  background: var(--color-text-primary);
+  color: var(--color-bg);
+  border-radius: var(--radius-lg);
+  padding: 10px 18px;
+  box-shadow: var(--shadow-lg);
+  margin-bottom: 4px;
 }
 
 .batch-dock-actions {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
   gap: 8px;
 }
 
 .dock-action-btn {
-  font-size: 12.5px;
-  font-weight: 500;
-  padding: 6px 14px;
-  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
   cursor: pointer;
-  border: 1px solid transparent;
   transition: all 0.15s ease;
 }
 
-.btn-action-enable {
-  background: rgba(82, 196, 26, 0.1);
-  color: #52c41a;
-  border-color: rgba(82, 196, 26, 0.3);
+.dock-action-btn:hover {
+  background: rgba(255, 255, 255, 0.25);
 }
 
-.btn-action-enable:hover {
-  background: #52c41a;
+.dock-action-btn.btn-action-ping {
+  background: #f59e0b;
+  border-color: #f59e0b;
   color: #fff;
 }
-
-.btn-action-disable {
-  background: rgba(0, 0, 0, 0.05);
-  color: var(--color-text-secondary);
-  border-color: var(--color-border-subtle);
+.dock-action-btn.btn-action-ping:hover {
+  background: #d97706;
 }
 
-.btn-action-disable:hover {
-  background: rgba(0, 0, 0, 0.1);
-}
-
-.btn-action-export {
-  background: rgba(24, 144, 255, 0.1);
-  color: #1890ff;
-  border-color: rgba(24, 144, 255, 0.3);
-}
-
-.btn-action-export:hover {
-  background: #1890ff;
+.dock-action-btn.btn-action-enable {
+  background: #27c93f;
+  border-color: #27c93f;
   color: #fff;
 }
-
-.btn-action-delete {
-  background: rgba(255, 77, 79, 0.1);
-  color: #ff4d4f;
-  border-color: rgba(255, 77, 79, 0.3);
+.dock-action-btn.btn-action-enable:hover {
+  background: #20a032;
 }
 
-.btn-action-delete:hover {
-  background: #ff4d4f;
+.dock-action-btn.btn-action-delete {
+  background: #ef4444;
+  border-color: #ef4444;
   color: #fff;
 }
-
-.btn-action-cancel {
-  background: none;
-  border: 1px solid var(--color-border-subtle);
-  color: var(--color-text-muted);
+.dock-action-btn.btn-action-delete:hover {
+  background: #dc2626;
 }
 
-.btn-action-cancel:hover {
-  color: var(--color-text-primary);
-}
-
-/* ─── 表格卡片 ────────────────────────────────────────────── */
+/* 表格卡片 */
 .table-card {
   background: var(--color-surface);
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-lg);
   overflow: hidden;
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-xs);
 }
 
 .source-name-cell {
@@ -812,23 +1107,24 @@ onMounted(() => {
 }
 
 .source-url-cell {
-  font-size: 12.5px;
-  color: var(--color-text-muted);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  font-family: monospace;
 }
 
 .badge {
-  font-size: 11.5px;
-  padding: 2px 8px;
+  display: inline-block;
+  padding: 2px 7px;
   border-radius: 4px;
+  font-size: 11.5px;
+  font-weight: 600;
 }
-
 .badge-configured {
-  background: rgba(82, 196, 26, 0.12);
-  color: #52c41a;
+  background: var(--color-accent-pale);
+  color: var(--color-accent);
 }
-
 .badge-empty {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--color-surface-hover);
   color: var(--color-text-muted);
 }
 
@@ -836,53 +1132,106 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   padding: 14px 18px;
-  background: var(--color-surface);
   border-top: 1px solid var(--color-border-subtle);
+  background: var(--color-surface);
 }
 
-/* ─── 导入弹窗 ────────────────────────────────────────────── */
+/* 导入弹窗样式 */
 .tab-pane-content {
-  padding: 12px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 6px 0;
 }
 
 .tab-tip {
   font-size: 13px;
   color: var(--color-text-secondary);
-  margin-bottom: 10px;
+  margin: 0;
 }
 
 .preset-links {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 10px;
   flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
 }
 
 .preset-label {
-  font-size: 12px;
   color: var(--color-text-muted);
 }
 
 .preset-tag {
-  font-size: 11.5px;
   color: var(--color-accent);
   background: var(--color-accent-pale);
   padding: 2px 8px;
-  border-radius: 12px;
+  border-radius: 10px;
   cursor: pointer;
-  transition: opacity 0.2s;
+  transition: all 0.15s ease;
 }
 
 .preset-tag:hover {
-  opacity: 0.8;
-  text-decoration: underline;
+  transform: translateY(-1px);
+  filter: brightness(1.1);
+}
+
+/* 导入超时控制 */
+.import-timeout-control {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  font-size: 12.5px;
+}
+
+.timeout-label {
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.timeout-unit {
+  color: var(--color-text-muted);
+}
+
+.timeout-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 6px;
+}
+
+.t-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.t-chip:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.t-chip.active {
+  background: var(--color-accent-pale);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  font-weight: 600;
 }
 
 .import-action-row {
-  margin-top: 18px;
   display: flex;
   justify-content: flex-end;
+  margin-top: 6px;
 }
 
 .upload-dropzone {
@@ -890,68 +1239,70 @@ onMounted(() => {
 }
 
 .upload-drag-inner {
-  padding: 24px 0;
   display: flex;
   flex-direction: column;
   align-items: center;
+  padding: 24px;
   gap: 8px;
 }
 
-/* ─── 预设源列表 ──────────────────────────────────────────── */
 .preset-list {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  max-height: 380px;
+  overflow-y: auto;
 }
 
 .preset-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
   padding: 12px 14px;
+  background: var(--color-bg);
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-md);
-  background: var(--color-bg);
+  gap: 12px;
 }
 
 .preset-name {
   font-size: 14px;
   font-weight: 600;
   color: var(--color-text-primary);
-  margin-bottom: 3px;
 }
 
 .preset-desc {
   font-size: 12px;
   color: var(--color-text-muted);
+  margin-top: 2px;
 }
 
-/* ─── 空状态 ──────────────────────────────────────────────── */
 .empty-box {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 64px 0;
-  text-align: center;
+  padding: 60px 20px;
+  background: var(--color-surface);
+  border: 1px dashed var(--color-border-subtle);
+  border-radius: var(--radius-lg);
+  gap: 10px;
 }
 
 .empty-icon {
-  font-size: 48px;
-  margin-bottom: 12px;
+  font-size: 40px;
 }
 
 .empty-title {
-  font-size: 16px;
+  font-size: 17px;
   font-weight: 600;
   color: var(--color-text-primary);
-  margin: 0 0 6px;
+  margin: 0;
 }
 
 .empty-desc {
   font-size: 13px;
-  color: var(--color-text-secondary);
-  margin: 0 0 20px;
+  color: var(--color-text-muted);
+  margin: 0 0 10px;
 }
 </style>

@@ -2,7 +2,7 @@
   <section class="settings-page" aria-label="应用系统设置">
     <div class="page-header">
       <h2 class="page-title">系统与爬虫设置</h2>
-      <p class="page-subtitle">配置网络代理、单源请求超时时间与多源并发搜索线程数</p>
+      <p class="page-subtitle">配置网络代理、并发参数、搜索超时及书源健康度自动巡检</p>
     </div>
 
     <!-- ── 性能与并发参数配置 ──────────────────────────────── -->
@@ -71,6 +71,106 @@
       </div>
     </div>
 
+    <!-- ── 书源健康度定时巡检 ──────────────────────────────── -->
+    <div class="settings-card">
+      <div class="card-header">
+        <div class="card-icon" style="background: rgba(39, 201, 63, 0.15); color: #27c93f;" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
+          </svg>
+        </div>
+        <div style="flex: 1;">
+          <div class="card-title-row">
+            <div class="card-title">书源健康度定时巡检</div>
+            <el-tag size="small" :type="healthStatus?.scanning ? 'warning' : (healthCheckEnabled ? 'success' : 'info')">
+              {{ healthStatus?.scanning ? '正在巡检中...' : (healthCheckEnabled ? '定时巡检已启用' : '已暂停') }}
+            </el-tag>
+          </div>
+          <p class="card-desc">后台自动静默探测书源连通性、响应速度并标记失效源，保障全网搜索始终流畅。</p>
+        </div>
+      </div>
+
+      <!-- 巡检开关 -->
+      <div class="field-group-inline">
+        <div>
+          <div class="field-label">启用后台自动巡检</div>
+          <span class="field-hint">按设定周期在后台异步探测所有书源的健康状态。</span>
+        </div>
+        <el-switch v-model="healthCheckEnabled" />
+      </div>
+
+      <!-- 巡检周期 -->
+      <div class="field-group" v-if="healthCheckEnabled">
+        <div class="field-title-row">
+          <label class="field-label">巡检执行周期</label>
+          <span class="field-tag">每 {{ healthCheckInterval }} 小时一次</span>
+        </div>
+        <div class="field-control-row">
+          <div class="preset-chips">
+            <button class="chip-btn" :class="{ active: healthCheckInterval === 1 }" @click="healthCheckInterval = 1">每 1 小时</button>
+            <button class="chip-btn" :class="{ active: healthCheckInterval === 6 }" @click="healthCheckInterval = 6">每 6 小时 (推荐)</button>
+            <button class="chip-btn" :class="{ active: healthCheckInterval === 12 }" @click="healthCheckInterval = 12">每 12 小时</button>
+            <button class="chip-btn" :class="{ active: healthCheckInterval === 24 }" @click="healthCheckInterval = 24">每 24 小时 (每天一次)</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 自动隔离失效源 -->
+      <div class="field-group-inline">
+        <div>
+          <div class="field-label">自动隔离失效书源</div>
+          <span class="field-hint">巡检发现超时、关站或报错的书源时，自动将其置为「禁用」状态。</span>
+        </div>
+        <el-switch v-model="autoDisableDead" />
+      </div>
+
+      <!-- 巡检状态概览卡片 -->
+      <div class="health-summary-box">
+        <div class="summary-header">
+          <span class="summary-title">最近体检结果</span>
+          <span class="summary-time">{{ healthStatus?.lastScanTime ? `完成于 ${healthStatus.lastScanTime}` : '暂未执行过全量体检' }}</span>
+        </div>
+        <div class="health-stats-row">
+          <div class="stat-item total">
+            <span class="stat-val">{{ healthStatus?.total || 0 }}</span>
+            <span class="stat-lbl">书源总数</span>
+          </div>
+          <div class="stat-item healthy">
+            <span class="stat-val">{{ healthStatus?.healthy || 0 }}</span>
+            <span class="stat-lbl">🟢 健康 (<1.2s)</span>
+          </div>
+          <div class="stat-item slow">
+            <span class="stat-val">{{ healthStatus?.slow || 0 }}</span>
+            <span class="stat-lbl">🟡 迟缓 (>1.2s)</span>
+          </div>
+          <div class="stat-item dead">
+            <span class="stat-val">{{ healthStatus?.dead || 0 }}</span>
+            <span class="stat-lbl">🔴 失效/异常</span>
+          </div>
+        </div>
+        <div class="health-actions-row">
+          <el-button
+            type="primary"
+            class="btn-gold"
+            size="small"
+            :loading="healthStatus?.scanning || runningCheck"
+            @click="handleRunHealthCheck"
+          >
+            ⚡ 立即执行全面体检
+          </el-button>
+          <el-button
+            v-if="healthStatus?.dead"
+            type="danger"
+            size="small"
+            plain
+            @click="handleDisableDead"
+          >
+            一键禁用 {{ healthStatus.dead }} 个失效书源
+          </el-button>
+        </div>
+      </div>
+    </div>
+
     <!-- ── 网络代理配置 ──────────────────────────────────── -->
     <div class="settings-card">
       <div class="card-header">
@@ -89,16 +189,46 @@
 
       <div class="field-group">
         <label for="proxy-input" class="field-label">代理地址</label>
-        <input
-          id="proxy-input"
-          v-model="proxy"
-          type="url"
-          class="field-input"
-          placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:10808"
-          spellcheck="false"
-          autocomplete="off"
-        />
-        <span class="field-hint">格式支持：<code>http://host:port</code> 或 <code>socks5://host:port</code></span>
+        <div class="proxy-input-group">
+          <input
+            id="proxy-input"
+            v-model="proxy"
+            type="url"
+            class="field-input"
+            placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:10808"
+            spellcheck="false"
+            autocomplete="off"
+            @input="proxyTestResult = null"
+          />
+          <el-button
+            type="primary"
+            class="btn-gold"
+            :loading="testingProxy"
+            :disabled="!proxy.trim()"
+            @click="handleTestProxy"
+          >
+            ⚡ 测试代理连接
+          </el-button>
+        </div>
+        <span class="field-hint">格式支持：<code>http://host:port</code>、<code>socks5://host:port</code> 或 <code>http://user:pass@host:port</code></span>
+
+        <!-- 代理测试结果卡片 -->
+        <div v-if="proxyTestResult" class="proxy-test-card" :class="proxyTestResult.ok ? 'success' : 'failed'">
+          <div class="test-header">
+            <span class="test-icon">{{ proxyTestResult.ok ? '✓' : '✕' }}</span>
+            <span class="test-title">{{ proxyTestResult.ok ? '代理连通正常' : '代理测试失败' }}</span>
+            <span v-if="proxyTestResult.delay >= 0" class="test-delay">{{ proxyTestResult.delay }}ms</span>
+          </div>
+          <div class="test-body">
+            <div v-if="proxyTestResult.ok" class="test-detail">
+              <span>出口公网 IP: <strong>{{ proxyTestResult.ip || '已连接' }}</strong></span>
+              <span v-if="proxyTestResult.status">状态: HTTP {{ proxyTestResult.status }}</span>
+            </div>
+            <div v-else class="test-error">
+              {{ proxyTestResult.error || '无法连接到指定的代理服务器，请检查地址、端口或鉴权密码' }}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -143,43 +273,128 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
-import { getSettings, saveSettings } from '@/api'
+import { onMounted, onUnmounted, ref } from 'vue'
+import { ElMessage, ElNotification } from 'element-plus'
+import {
+  getSettings,
+  saveSettings,
+  getHealthStatus,
+  runHealthCheck,
+  disableDeadSources,
+  testProxy,
+  type HealthStatusRes,
+  type ProxyTestResult,
+} from '@/api'
 
 const proxy = ref('')
 const timeout = ref(15)
 const maxWorkers = ref(12)
-const saving = ref(false)
+const healthCheckEnabled = ref(true)
+const healthCheckInterval = ref(6)
+const autoDisableDead = ref(false)
 
-async function load() {
+const saving = ref(false)
+const testingProxy = ref(false)
+const proxyTestResult = ref<ProxyTestResult | null>(null)
+const runningCheck = ref(false)
+const healthStatus = ref<HealthStatusRes | null>(null)
+let pollTimer: number | null = null
+
+async function loadSettings() {
   try {
     const s = await getSettings()
     proxy.value = s.proxy || ''
-    timeout.value = typeof s.timeout === 'number' ? s.timeout : 15
-    maxWorkers.value = typeof s.max_workers === 'number' ? s.max_workers : 12
+    timeout.value = s.timeout ?? 15
+    maxWorkers.value = s.max_workers ?? 12
+    healthCheckEnabled.value = s.health_check_enabled ?? true
+    healthCheckInterval.value = s.health_check_interval ?? 6
+    autoDisableDead.value = s.auto_disable_dead ?? false
   } catch (e: any) {
-    ElMessage.error(e.message || '加载设置失败')
+    ElMessage.error(e.message || '加载配置失败')
+  }
+}
+
+async function loadHealthStatus() {
+  try {
+    healthStatus.value = await getHealthStatus()
+  } catch (e) {
+    // ignore
+  }
+}
+
+async function handleRunHealthCheck() {
+  runningCheck.value = true
+  try {
+    const res = await runHealthCheck()
+    ElMessage.success(res.message || '已在后台启动全面体检')
+    await loadHealthStatus()
+  } catch (e: any) {
+    ElMessage.error(e.message || '启动体检失败')
+  } finally {
+    runningCheck.value = false
+  }
+}
+
+async function handleDisableDead() {
+  try {
+    const res = await disableDeadSources()
+    ElMessage.success(res.message || `已禁用 ${res.disabledCount} 个失效书源`)
+    await loadHealthStatus()
+  } catch (e: any) {
+    ElMessage.error(e.message || '操作失败')
+  }
+}
+
+async function handleTestProxy() {
+  const p = proxy.value.trim()
+  if (!p) {
+    ElMessage.warning('请输入要测试的代理地址')
+    return
+  }
+  testingProxy.value = true
+  proxyTestResult.value = null
+  try {
+    const res = await testProxy(p)
+    proxyTestResult.value = res
+    if (res.ok) {
+      ElMessage.success(`代理连通测试成功！响应延迟 ${res.delay}ms，出口 IP: ${res.ip || '已连接'}`)
+    } else {
+      ElMessage.error(`代理连通测试失败: ${res.error || '无法连通'}`)
+    }
+  } catch (e: any) {
+    proxyTestResult.value = { ok: false, delay: -1, error: e.message }
+    ElMessage.error(`测试失败: ${e.message}`)
+  } finally {
+    testingProxy.value = false
   }
 }
 
 function resetDefaults() {
   timeout.value = 15
   maxWorkers.value = 12
-  ElMessage.info('已重置为系统推荐参数（需点击保存生效）')
+  healthCheckEnabled.value = true
+  healthCheckInterval.value = 6
+  autoDisableDead.value = false
+  ElMessage.info('已重置为系统默认推荐参数，请点击「保存配置」生效')
 }
 
 async function save() {
   saving.value = true
   try {
-    const res = await saveSettings({
+    await saveSettings({
       proxy: proxy.value.trim(),
-      timeout: Number(timeout.value) || 15,
-      max_workers: Number(maxWorkers.value) || 12,
+      timeout: timeout.value,
+      max_workers: maxWorkers.value,
+      health_check_enabled: healthCheckEnabled.value,
+      health_check_interval: healthCheckInterval.value,
+      auto_disable_dead: autoDisableDead.value,
     })
-    timeout.value = res.timeout || timeout.value
-    maxWorkers.value = res.max_workers || maxWorkers.value
-    ElMessage.success('设置已成功保存并实时生效')
+    ElNotification({
+      title: '设置保存成功',
+      message: '系统参数已全量更新并实时生效',
+      type: 'success',
+      duration: 3000,
+    })
   } catch (e: any) {
     ElMessage.error(e.message || '保存失败')
   } finally {
@@ -187,32 +402,116 @@ async function save() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  loadSettings()
+  loadHealthStatus()
+  pollTimer = window.setInterval(loadHealthStatus, 8000)
+})
+
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer)
+})
 </script>
 
 <style scoped>
 .settings-page {
-  padding: 32px 28px 64px;
-  max-width: 680px;
+  padding: 28px 36px 60px;
+  max-width: 780px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 20px;
+}
+
+/* 代理输入组与测试卡片 */
+.proxy-input-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.proxy-test-card {
+  margin-top: 6px;
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  transition: all 0.2s ease;
+}
+
+.proxy-test-card.success {
+  background: rgba(39, 201, 63, 0.1);
+  border: 1px solid rgba(39, 201, 63, 0.3);
+}
+
+.proxy-test-card.failed {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.test-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.proxy-test-card.success .test-icon,
+.proxy-test-card.success .test-title {
+  color: #27c93f;
+  font-weight: 700;
+}
+
+.proxy-test-card.failed .test-icon,
+.proxy-test-card.failed .test-title {
+  color: #ef4444;
+  font-weight: 700;
+}
+
+.test-delay {
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.proxy-test-card.success .test-delay {
+  color: #27c93f;
+  background: rgba(39, 201, 63, 0.2);
+}
+
+.test-detail {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: var(--color-text-secondary);
+}
+
+.test-detail strong {
+  color: var(--color-text-primary);
+}
+
+.test-error {
+  color: #ef4444;
+  word-break: break-all;
+  line-height: 1.4;
 }
 
 .page-header {
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 
 .page-title {
-  font-size: 24px;
+  font-size: 22px;
   font-weight: 700;
   color: var(--color-text-primary);
-  margin: 0 0 4px;
+  margin: 0 0 6px;
 }
 
 .page-subtitle {
-  font-size: 13.5px;
+  font-size: 13px;
   color: var(--color-text-secondary);
   margin: 0;
 }
@@ -221,23 +520,23 @@ onMounted(load)
   background: var(--color-surface);
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-lg);
-  padding: 20px 22px;
-  border-left: 3.5px solid var(--color-accent);
+  padding: 24px 28px;
   display: flex;
   flex-direction: column;
-  gap: 18px;
-  box-shadow: var(--shadow-sm);
+  gap: 20px;
+  box-shadow: var(--shadow-xs);
 }
 
 .card-header {
   display: flex;
   align-items: flex-start;
-  gap: 12px;
+  gap: 14px;
+  padding-bottom: 4px;
 }
 
 .card-icon {
-  width: 36px;
-  height: 36px;
+  width: 38px;
+  height: 38px;
   border-radius: var(--radius-md);
   background: var(--color-accent-pale);
   color: var(--color-accent);
@@ -247,29 +546,40 @@ onMounted(load)
   flex-shrink: 0;
 }
 
+.card-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .card-title {
   font-size: 15px;
   font-weight: 600;
   color: var(--color-text-primary);
+  margin-bottom: 3px;
 }
 
 .card-desc {
   font-size: 12.5px;
-  color: var(--color-text-muted);
-  margin: 2px 0 0;
+  color: var(--color-text-secondary);
+  margin: 0;
+  line-height: 1.5;
 }
 
 .field-group {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 10px 0;
-  border-top: 1px dashed var(--color-border-subtle);
+  gap: 8px;
 }
 
-.field-group:first-of-type {
-  border-top: none;
-  padding-top: 0;
+.field-group-inline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  border-top: 1px dashed var(--color-border-subtle);
 }
 
 .field-title-row {
@@ -286,31 +596,32 @@ onMounted(load)
 
 .field-tag {
   font-size: 12px;
+  font-weight: 500;
   color: var(--color-accent);
   background: var(--color-accent-pale);
-  padding: 1px 8px;
+  padding: 2px 8px;
   border-radius: 10px;
 }
 
 .field-control-row {
   display: flex;
   align-items: center;
+  gap: 12px;
   flex-wrap: wrap;
-  gap: 10px;
-  margin: 4px 0;
 }
 
 .preset-chips {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
   gap: 6px;
+  flex-wrap: wrap;
 }
 
 .chip-btn {
-  font-size: 11.5px;
-  padding: 3px 10px;
-  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--color-border-subtle);
   background: var(--color-bg);
   color: var(--color-text-secondary);
@@ -332,14 +643,16 @@ onMounted(load)
 
 .field-input {
   width: 100%;
-  padding: 9px 12px;
-  border: 1.5px solid var(--color-border-subtle);
+  padding: 9px 14px;
+  font-size: 13.5px;
+  border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-md);
   background: var(--color-bg);
   color: var(--color-text-primary);
-  font-size: 13.5px;
   outline: none;
   box-sizing: border-box;
+  font-family: inherit;
+  transition: border-color 0.15s ease;
 }
 
 .field-input:focus {
@@ -349,51 +662,130 @@ onMounted(load)
 .field-hint {
   font-size: 12px;
   color: var(--color-text-muted);
+  line-height: 1.5;
 }
 
+.field-hint code {
+  background: var(--color-bg);
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-family: monospace;
+}
+
+/* 巡检概览卡片 */
+.health-summary-box {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  padding: 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.summary-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.summary-title {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.summary-time {
+  color: var(--color-text-muted);
+}
+
+.health-stats-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 4px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+}
+
+.stat-val {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.stat-lbl {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}
+
+.stat-item.healthy .stat-val { color: #27c93f; }
+.stat-item.slow .stat-val { color: #f59e0b; }
+.stat-item.dead .stat-val { color: #ef4444; }
+
+.health-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+/* 底部操作条 */
 .settings-bottom-bar {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 12px;
-  padding-top: 8px;
+  justify-content: space-between;
+  padding: 6px 0;
 }
 
 .btn-reset {
+  padding: 8px 16px;
+  font-size: 13px;
+  color: var(--color-text-muted);
   background: none;
   border: 1px solid var(--color-border-subtle);
-  color: var(--color-text-muted);
-  padding: 9px 16px;
-  font-size: 13px;
   border-radius: var(--radius-md);
   cursor: pointer;
   transition: all 0.15s ease;
 }
 
 .btn-reset:hover {
-  color: var(--color-text-primary);
   border-color: var(--color-text-secondary);
+  color: var(--color-text-primary);
 }
 
 .btn-save {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 9px 24px;
+  gap: 7px;
+  padding: 10px 24px;
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: var(--radius-md);
+  border: none;
   background: var(--color-accent);
   color: #fff;
-  border: none;
-  border-radius: var(--radius-md);
-  font-size: 13.5px;
-  font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s ease;
+  box-shadow: 0 2px 8px rgba(184, 134, 11, 0.28);
+  transition: all 0.15s ease;
 }
 
-.btn-save:hover {
-  background: var(--color-accent-light);
+.btn-save:hover:not(:disabled) {
+  filter: brightness(1.08);
   transform: translateY(-1px);
-  box-shadow: var(--shadow-accent);
+}
+
+.btn-save:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
 }
 
 .spin {
@@ -406,7 +798,6 @@ onMounted(load)
 }
 
 .about-card {
-  border-left-color: var(--color-border-subtle);
   opacity: 0.85;
 }
 </style>
