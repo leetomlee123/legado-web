@@ -793,26 +793,51 @@ def get_source_presets():
 
 @app.get("/api/settings")
 def get_settings():
-    return jsonify({"proxy": get_proxy()})
+    from settings import get_proxy, get_timeout, get_max_workers
+    return jsonify({
+        "proxy": get_proxy(),
+        "timeout": get_timeout(),
+        "max_workers": get_max_workers(),
+    })
 
 
 @app.post("/api/settings")
 def update_settings():
+    from settings import (
+        get_proxy,
+        set_proxy,
+        get_timeout,
+        set_timeout,
+        get_max_workers,
+        set_max_workers,
+    )
     body = request.get_json(silent=True) or {}
-    proxy = (body.get("proxy") or "").strip()
-    set_proxy(proxy)
-    return jsonify({"ok": True, "proxy": get_proxy()})
+    if "proxy" in body:
+        set_proxy(str(body.get("proxy") or "").strip())
+    if "timeout" in body:
+        set_timeout(body.get("timeout"))
+    if "max_workers" in body or "maxWorkers" in body:
+        set_max_workers(body.get("max_workers") or body.get("maxWorkers"))
+
+    return jsonify({
+        "ok": True,
+        "proxy": get_proxy(),
+        "timeout": get_timeout(),
+        "max_workers": get_max_workers(),
+    })
 
 
 def _execute_single_source_search(sid: int, name: str, rule_str: str, keyword: str) -> dict:
     from source import fetch_search_response
+    from settings import get_timeout
     rule = parse_legado_rule(rule_str)
     if rule is None or rule.search is None or not rule.search.url:
         return {"sourceId": sid, "sourceName": name, "books": [], "error": "无搜索规则"}
 
     search_spec = rule.search.url
+    timeout = get_timeout()
     try:
-        html, final_url = fetch_search_response(search_spec, keyword)
+        html, final_url = fetch_search_response(search_spec, keyword, timeout=timeout, base_url=rule.base_url)
     except Exception as e:
         return {"sourceId": sid, "sourceName": name, "books": [], "error": str(e)}
 
@@ -822,7 +847,6 @@ def _execute_single_source_search(sid: int, name: str, rule_str: str, keyword: s
         print(f"[_execute_single_source_search] crawl_search error for {name}: {e}")
         return {"sourceId": sid, "sourceName": name, "books": [], "error": str(e)}
 
-    print(f"[_execute_single_source_search] sid={sid} name={name} html_len={len(html)} books_found={len(books)}")
     for b in books:
         b["sourceId"] = sid
         b["sourceType"] = "web"
@@ -834,6 +858,7 @@ def search_stream():
     """SSE 流式搜索：每搜完一个书源立即向前端推送一条事件数据。"""
     import queue
     from concurrent.futures import ThreadPoolExecutor
+    from settings import get_max_workers
 
     keyword = (request.args.get("keyword") or "").strip()
     if not keyword:
@@ -868,7 +893,8 @@ def search_stream():
             res = _execute_single_source_search(row["id"], row["name"], row["rule"] or "", keyword)
             q.put(res)
 
-        executor = ThreadPoolExecutor(max_workers=min(12, total_sources))
+        workers = min(get_max_workers(), max(1, total_sources))
+        executor = ThreadPoolExecutor(max_workers=workers)
         for r in rows:
             executor.submit(worker, r)
         executor.shutdown(wait=False)
@@ -877,7 +903,7 @@ def search_stream():
         total_books = 0
         while completed < total_sources:
             try:
-                res = q.get(timeout=15.0)
+                res = q.get(timeout=30.0)
                 completed += 1
                 total_books += len(res.get("books", []))
                 payload = {
@@ -907,6 +933,7 @@ def search_stream():
 def search_all():
     """标准并发搜索：多线程并发检索后统一返回。"""
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from settings import get_max_workers
 
     keyword = (request.args.get("keyword") or "").strip()
     if not keyword:

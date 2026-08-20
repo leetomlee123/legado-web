@@ -250,6 +250,8 @@ export function searchStream(
 // 设置
 export interface AppSettings {
   proxy: string
+  timeout?: number
+  max_workers?: number
 }
 
 export async function getSettings(): Promise<AppSettings> {

@@ -37,7 +37,13 @@ def decode_http_response(resp) -> str:
         return content.decode("gb18030", errors="replace")
 
 
-def fetch_url(url: str, timeout: float = 20) -> str:
+def fetch_url(url: str, timeout: float = 20, base_url: str = "") -> str:
+    url = (url or "").strip()
+    if base_url and not (url.startswith("http://") or url.startswith("https://")):
+        url = urljoin(base_url, url)
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise ValueError(f"无效的请求地址: {url}")
+
     resp = cffi_requests.get(
         url,
         impersonate="chrome120",
@@ -45,6 +51,7 @@ def fetch_url(url: str, timeout: float = 20) -> str:
         headers={"User-Agent": UA},
         allow_redirects=True,
         proxy=get_proxy() or None,
+        verify=False,
     )
     resp.raise_for_status()
     return decode_http_response(resp)
@@ -84,6 +91,7 @@ class ContentRule:
 
 @dataclass
 class SourceRule:
+    base_url: str = ""
     search: SearchRule | None = None
     detail: DetailRule | None = None
     toc: TocRule | None = None
@@ -230,6 +238,7 @@ def parse_legado_rule(s: str) -> SourceRule | None:
         return None
 
     out = parse_rule(s) or SourceRule()
+    out.base_url = _s(raw.get("bookSourceUrl") or raw.get("sourceUrl") or raw.get("url") or raw.get("host") or "").strip()
     _fill_native_search(out, raw)
     _fill_native_detail(out, raw)
     _fill_native_toc(out, raw)
@@ -469,7 +478,69 @@ def safe_select_one(el: Tag, selector: str) -> Tag | None:
     return found[0] if found else None
 
 
-def fetch_search_response(search_spec: str, keyword: str, timeout: int = 15) -> tuple[str, str]:
+def _parse_options_json(raw_json: str) -> dict:
+    import ast
+    raw_json = (raw_json or "").strip()
+    if not raw_json:
+        return {}
+    try:
+        return json.loads(raw_json)
+    except Exception:
+        pass
+    try:
+        val = ast.literal_eval(raw_json)
+        if isinstance(val, dict):
+            return val
+    except Exception:
+        pass
+    return {}
+
+
+def extract_legado_search_url_spec(spec: str, base_url: str = "") -> str:
+    """从包含 @js: / <js> / 拼接语法的 searchUrl 中智能提取规范化的 search_spec。"""
+    spec = (spec or "").strip()
+    if not spec:
+        return ""
+
+    if "<js>" in spec:
+        cleaned = re.sub(r"^<js>.*?</js>", "", spec, flags=re.DOTALL).strip()
+        if cleaned:
+            spec = cleaned
+        else:
+            m = re.search(r"['\"](https?://[^'\"]+|/[^'\"]+)['\"]", spec)
+            if m:
+                spec = m.group(1)
+            else:
+                spec = re.sub(r"</?js>", "", spec).strip()
+                spec = re.sub(r";\s*result.*$", "", spec).strip()
+
+    if spec.startswith("@js:"):
+        js_code = spec[4:].strip()
+        m_base = re.search(r'url\s*=\s*baseUrl\s*\+\s*["\'](.*?)(?:["\']\s*;|$)', js_code)
+        if m_base:
+            part = m_base.group(1).strip()
+            if "," in part:
+                p_url, p_opt = part.split(",", 1)
+                spec = urljoin(base_url, p_url.strip()) + "," + p_opt.strip()
+            else:
+                spec = urljoin(base_url, part)
+        else:
+            m_url = re.search(r'url\s*=\s*["\'](https?://.*?|/.*?)(?:["\']\s*;|$)', js_code)
+            if m_url:
+                spec = m_url.group(1).strip()
+            else:
+                m_any = re.search(r'["\'](https?://.*?|/.*?)(?:["\']\s*;|$)', js_code)
+                if m_any:
+                    spec = m_any.group(1).strip()
+                else:
+                    m_http = re.search(r'(https?://[^\s`"\'\)]+)', js_code)
+                    if m_http:
+                        spec = m_http.group(1)
+
+    return spec.strip()
+
+
+def fetch_search_response(search_spec: str, keyword: str, timeout: int = 15, base_url: str = "") -> tuple[str, str]:
     """
     支持 Legado 3.0 标准的 searchUrl 规范：
     1. 简单 GET URL: https://example.com/s?q={{key}}
@@ -480,26 +551,24 @@ def fetch_search_response(search_spec: str, keyword: str, timeout: int = 15) -> 
          "charset": "UTF-8",
          "headers": { ... }
        }
+    3. 支持 @js: / <js> 语法提炼与单引号 JSON 配置
     """
     import urllib.parse
 
-    search_spec = (search_spec or "").strip()
-    if not search_spec:
-        raise ValueError("searchUrl 为空")
+    spec = extract_legado_search_url_spec(search_spec, base_url)
+    if not spec:
+        raise ValueError("searchUrl 为空或无法解析")
 
-    url = search_spec
+    url = spec
     options = {}
 
-    if "," in search_spec:
-        idx = search_spec.find(",")
-        raw_url = search_spec[:idx].strip()
-        raw_json = search_spec[idx + 1:].strip()
-        if raw_json.startswith("{") and raw_json.endswith("}"):
-            try:
-                options = json.loads(raw_json)
-                url = raw_url
-            except Exception:
-                pass
+    if "," in spec:
+        idx = spec.find(",")
+        raw_url = spec[:idx].strip()
+        raw_json = spec[idx + 1:].strip()
+        if (raw_json.startswith("{") and raw_json.endswith("}")) or (raw_json.startswith("'{") and raw_json.endswith("}'")):
+            options = _parse_options_json(raw_json)
+            url = raw_url
 
     method = str(options.get("method", "GET")).upper()
     charset = str(options.get("charset", "UTF-8")).upper()
@@ -516,14 +585,29 @@ def fetch_search_response(search_spec: str, keyword: str, timeout: int = 15) -> 
     def _replace_key(text: str) -> str:
         if not text:
             return ""
-        return (
+        t = (
             text.replace("{{key}}", esc)
             .replace("{{search}}", esc)
             .replace("{search}", esc)
             .replace("{{keyword}}", esc)
+            .replace("{{page}}", "1")
+            .replace("{{page+1}}", "2")
+            .replace("{{page-1}}", "0")
+            .replace("{{(page-1)*10}}", "0")
+            .replace("{{(page-1)*50}}", "0")
         )
+        return re.sub(r"\{\{.*?\}\}", "1", t)
 
-    target_url = _replace_key(url)
+    target_url = _replace_key(url).strip()
+
+    # 如果是相对路径，拼接 base_url
+    if base_url and not (target_url.startswith("http://") or target_url.startswith("https://")):
+        target_url = urljoin(base_url, target_url)
+
+    # 检验 URL 合法性
+    if not (target_url.startswith("http://") or target_url.startswith("https://")):
+        raise ValueError(f"无效的书源搜索地址: {target_url or search_spec}")
+
     req_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
@@ -555,6 +639,7 @@ def fetch_search_response(search_spec: str, keyword: str, timeout: int = 15) -> 
             impersonate="chrome120",
             timeout=timeout,
             proxy=get_proxy() or None,
+            verify=False,
         )
     else:
         # GET 请求
@@ -566,6 +651,7 @@ def fetch_search_response(search_spec: str, keyword: str, timeout: int = 15) -> 
             impersonate="chrome120",
             timeout=timeout,
             proxy=get_proxy() or None,
+            verify=False,
         )
 
     content = resp.content
