@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -1044,9 +1045,24 @@ def stream_logs():
     )
 
 
-def _execute_single_source_search(sid: int, name: str, rule_str: str, keyword: str) -> dict:
+# 存储当前活跃的搜索 stop_event，支持通过 searchId 实时终止
+_active_search_events: dict[str, threading.Event] = {}
+_active_search_lock = threading.Lock()
+
+
+def _execute_single_source_search(
+    sid: int,
+    name: str,
+    rule_str: str,
+    keyword: str,
+    stop_event: threading.Event | None = None,
+) -> dict:
     from source import fetch_search_response
     from settings import get_timeout
+
+    if stop_event and stop_event.is_set():
+        return {"sourceId": sid, "sourceName": name, "books": [], "error": "cancelled"}
+
     rule = parse_legado_rule(rule_str)
     if rule is None or rule.search is None or not rule.search.url:
         logger.warning("[%s (ID:%s)] 缺少有效搜索规则", name, sid)
@@ -1054,11 +1070,20 @@ def _execute_single_source_search(sid: int, name: str, rule_str: str, keyword: s
 
     search_spec = rule.search.url
     timeout = get_timeout()
+
+    if stop_event and stop_event.is_set():
+        return {"sourceId": sid, "sourceName": name, "books": [], "error": "cancelled"}
+
     try:
         html, final_url = fetch_search_response(search_spec, keyword, timeout=timeout, base_url=rule.base_url)
     except Exception as e:
+        if stop_event and stop_event.is_set():
+            return {"sourceId": sid, "sourceName": name, "books": [], "error": "cancelled"}
         logger.warning("[%s (ID:%s)] 搜索请求失败: %s", name, sid, e)
         return {"sourceId": sid, "sourceName": name, "books": [], "error": str(e)}
+
+    if stop_event and stop_event.is_set():
+        return {"sourceId": sid, "sourceName": name, "books": [], "error": "cancelled"}
 
     try:
         books = crawl_search(html, rule.search, final_url)
@@ -1073,9 +1098,31 @@ def _execute_single_source_search(sid: int, name: str, rule_str: str, keyword: s
     return {"sourceId": sid, "sourceName": name, "books": books, "error": None}
 
 
+@app.post("/api/search/stop")
+def stop_search_route():
+    """显式停止指定或所有正在进行的后台搜索任务。"""
+    body = request.get_json(silent=True) or {}
+    search_id = (body.get("searchId") or "").strip()
+    stopped_count = 0
+    with _active_search_lock:
+        if search_id and search_id in _active_search_events:
+            _active_search_events[search_id].set()
+            _active_search_events.pop(search_id, None)
+            stopped_count += 1
+        else:
+            # 停止所有活跃搜索
+            for sid, evt in list(_active_search_events.items()):
+                evt.set()
+                stopped_count += 1
+            _active_search_events.clear()
+
+    logger.info("已接收到前端搜索终止指令: 停止了 %d 个后台搜索流", stopped_count)
+    return jsonify({"ok": True, "stoppedCount": stopped_count})
+
+
 @app.get("/api/search/stream")
 def search_stream():
-    """SSE 流式搜索：每搜完一个书源立即向前端推送一条事件数据。"""
+    """SSE 流式搜索：每搜完一个书源立即向前端推送一条事件数据，支持离开/断开立即终止后台搜索。"""
     import queue
     from concurrent.futures import ThreadPoolExecutor
     from settings import get_max_workers
@@ -1083,6 +1130,7 @@ def search_stream():
     keyword = (request.args.get("keyword") or "").strip()
     if not keyword:
         return write_msg(400, "缺少关键字")
+    search_id = (request.args.get("searchId") or "").strip() or f"search_{int(time.time()*1000)}"
     source_ids_str = (request.args.get("sourceIds") or "").strip()
 
     conn = require_db()
@@ -1099,11 +1147,15 @@ def search_stream():
     else:
         rows = conn.execute("SELECT id, name, rule FROM book_source WHERE enabled=1").fetchall()
 
-    logger.info("发起流式多源搜索: 关键词「%s」, 启用书源数: %d", keyword, len(rows))
+    logger.info("发起流式多源搜索: 关键词「%s」, 任务ID: %s, 启用书源数: %d", keyword, search_id, len(rows))
+
+    stop_event = threading.Event()
+    with _active_search_lock:
+        _active_search_events[search_id] = stop_event
 
     def generate():
         total_sources = len(rows)
-        yield f"data: {json.dumps({'type': 'start', 'totalSources': total_sources}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type': 'start', 'totalSources': total_sources, 'searchId': search_id}, ensure_ascii=False)}\n\n"
 
         if total_sources == 0:
             yield f"data: {json.dumps({'type': 'done', 'totalBooks': 0}, ensure_ascii=False)}\n\n"
@@ -1112,34 +1164,60 @@ def search_stream():
         q = queue.Queue()
 
         def worker(row):
-            res = _execute_single_source_search(row["id"], row["name"], row["rule"] or "", keyword)
-            q.put(res)
+            if stop_event.is_set():
+                return
+            res = _execute_single_source_search(
+                row["id"],
+                row["name"],
+                row["rule"] or "",
+                keyword,
+                stop_event=stop_event,
+            )
+            if not stop_event.is_set():
+                q.put(res)
 
         workers = min(get_max_workers(), max(1, total_sources))
         executor = ThreadPoolExecutor(max_workers=workers)
-        for r in rows:
-            executor.submit(worker, r)
-        executor.shutdown(wait=False)
+        futures = [executor.submit(worker, r) for r in rows]
 
         completed = 0
         total_books = 0
-        while completed < total_sources:
-            try:
-                res = q.get(timeout=30.0)
-                completed += 1
-                total_books += len(res.get("books", []))
-                payload = {
-                    "type": "source_result",
-                    "completed": completed,
-                    "totalSources": total_sources,
-                    **res,
-                }
-                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-            except queue.Empty:
-                break
+        try:
+            while completed < total_sources:
+                if stop_event.is_set():
+                    break
+                try:
+                    res = q.get(timeout=0.3)
+                    completed += 1
+                    total_books += len(res.get("books", []))
+                    payload = {
+                        "type": "source_result",
+                        "completed": completed,
+                        "totalSources": total_sources,
+                        **res,
+                    }
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                except queue.Empty:
+                    # 每 0.3 秒醒来检查一次 stop_event 和客户端连接
+                    continue
 
-        logger.info("流式搜索完成: 关键词「%s」, 共检索到 %d 本书籍", keyword, total_books)
-        yield f"data: {json.dumps({'type': 'done', 'totalBooks': total_books}, ensure_ascii=False)}\n\n"
+            if not stop_event.is_set():
+                logger.info("流式搜索正常完成: 关键词「%s」, 共检索到 %d 本书籍", keyword, total_books)
+                yield f"data: {json.dumps({'type': 'done', 'totalBooks': total_books}, ensure_ascii=False)}\n\n"
+        except (GeneratorExit, ConnectionResetError, BrokenPipeError):
+            logger.info("检测到客户端主动断开/离开搜索页: 关键词「%s」, 立即终止后台剩余检索 (已完成 %d/%d)", keyword, completed, total_sources)
+        finally:
+            # 立即触发全局中止信号，释放所有后台线程与网络请求
+            stop_event.set()
+            for f in futures:
+                f.cancel()
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            with _active_search_lock:
+                _active_search_events.pop(search_id, None)
+            logger.info("已彻底销毁后台搜索线程池: 关键词「%s」", keyword)
 
     return Response(
         generate(),

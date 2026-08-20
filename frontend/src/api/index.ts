@@ -202,7 +202,12 @@ export async function searchAll(
   return res as unknown as SourceSearchRes[]
 }
 
-// SSE 流式多源搜索（逐源即时推送，先搜先出）
+export async function stopBackendSearch(searchId?: string): Promise<{ ok: boolean; stoppedCount: number }> {
+  const res = await http.post('/search/stop', { searchId })
+  return res as unknown as { ok: boolean; stoppedCount: number }
+}
+
+// SSE 流式多源搜索（逐源即时推送，先搜先出，支持客户端断开立即取消后台检索）
 export function searchStream(
   keyword: string,
   sourceIds?: number[],
@@ -215,12 +220,14 @@ export function searchStream(
     completed?: number
     totalSources?: number
     totalBooks?: number
+    searchId?: string
   }) => void,
   onDone?: () => void,
   onError?: (err: any) => void
 ): () => void {
   const controller = new AbortController()
-  const params = new URLSearchParams({ keyword })
+  const searchId = `search_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+  const params = new URLSearchParams({ keyword, searchId })
   if (sourceIds?.length) {
     params.set('sourceIds', sourceIds.join(','))
   }
@@ -264,7 +271,11 @@ export function searchStream(
       onError?.(err)
     })
 
-  return () => controller.abort()
+  return () => {
+    controller.abort()
+    // 双重保底：发送显式停止请求通知后端彻底中止后台线程池
+    http.post('/search/stop', { searchId }).catch(() => {})
+  }
 }
 
 // 设置
