@@ -20,6 +20,23 @@ from settings import get_proxy
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 
+def decode_http_response(resp) -> str:
+    content = resp.content or b""
+    if not content:
+        return ""
+    head_sample = content[:2048].lower()
+    if b"charset=gbk" in head_sample or b"charset=\"gbk\"" in head_sample or b"charset='gbk'" in head_sample:
+        return content.decode("gbk", errors="replace")
+    if b"charset=gb2312" in head_sample or b"charset=\"gb2312\"" in head_sample:
+        return content.decode("gb2312", errors="replace")
+    if b"charset=gb18030" in head_sample or b"charset=\"gb18030\"" in head_sample:
+        return content.decode("gb18030", errors="replace")
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        return content.decode("gb18030", errors="replace")
+
+
 def fetch_url(url: str, timeout: float = 20) -> str:
     resp = cffi_requests.get(
         url,
@@ -30,14 +47,7 @@ def fetch_url(url: str, timeout: float = 20) -> str:
         proxy=get_proxy() or None,
     )
     resp.raise_for_status()
-    # curl_cffi 已按 Content-Type / charset 解码；必要时回退
-    text = resp.text or ""
-    if not text and resp.content:
-        try:
-            text = resp.content.decode("utf-8")
-        except UnicodeDecodeError:
-            text = resp.content.decode("gb18030", errors="replace")
-    return text
+    return decode_http_response(resp)
 
 
 @dataclass
@@ -132,8 +142,6 @@ def parse_rule(s: str) -> SourceRule | None:
 def _fill_native_search(out: SourceRule, raw: dict) -> None:
     search = out.search or SearchRule()
     search_url = _s(raw.get("searchUrl"))
-    if "," in search_url:
-        search_url = search_url.split(",", 1)[0]
     if not search.url:
         search.url = search_url
 
@@ -232,31 +240,127 @@ def parse_legado_rule(s: str) -> SourceRule | None:
     return out
 
 
-def split_legado_rules(name: str, text: str) -> list[tuple[str, str]]:
+def _extract_source_item(it: dict, default_name: str = "") -> tuple[str, str, str] | None:
+    if not isinstance(it, dict):
+        return None
+    nm = (
+        _s(it.get("bookSourceName"))
+        or _s(it.get("sourceName"))
+        or _s(it.get("name"))
+        or _s(it.get("title"))
+        or default_name
+        or "书源"
+    )
+    u = (
+        _s(it.get("bookSourceUrl"))
+        or _s(it.get("sourceUrl"))
+        or _s(it.get("url"))
+        or _s(it.get("searchUrl"))
+        or _s(it.get("sortUrl"))
+    )
+    return (nm, u, json.dumps(it, ensure_ascii=False))
+
+
+def parse_sources_from_payload(text: str, default_name: str = "") -> list[tuple[str, str, str]]:
+    """
+    智能解析任意形式的书源载荷（JSON 数组、单对象、HTML 页面中的嵌入 JSON 或链接）。
+    返回列表：[(name, source_url, rule_json_str)]
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    # 1. 尝试直接解析标准 JSON
     try:
-        arr = json.loads(text)
+        data = json.loads(text)
+        if isinstance(data, list):
+            out = []
+            for it in data:
+                item = _extract_source_item(it, default_name)
+                if item:
+                    out.append(item)
+            if out:
+                return out
+        elif isinstance(data, dict):
+            item = _extract_source_item(data, default_name)
+            if item:
+                return [item]
     except json.JSONDecodeError:
-        return [(name, text)]
-    if not isinstance(arr, list) or not arr:
-        return [(name, text)]
-    out: list[tuple[str, str]] = []
-    for it in arr:
-        if not isinstance(it, dict):
+        pass
+
+    # 2. 如果包含 HTML/文本，使用正则提取其中嵌套的 JSON 数组/对象
+    out = []
+    # 查找 [ { ... "sourceName" / "bookSourceName" ... } ] 结构
+    json_array_matches = re.findall(r"\[\s*\{.*?(?:\"bookSourceName\"|\"sourceName\"|\"ruleSearch\").*?\}\s*\]", text, re.DOTALL)
+    for block in json_array_matches:
+        try:
+            arr = json.loads(block)
+            if isinstance(arr, list):
+                for it in arr:
+                    item = _extract_source_item(it, default_name)
+                    if item:
+                        out.append(item)
+        except Exception:
             continue
-        nm = _s(it.get("bookSourceName")) or name or "书源"
-        out.append((nm, json.dumps(it, ensure_ascii=False)))
-    return out or [(name, text)]
+
+    if out:
+        return out
+
+    # 3. 查找单个 { "bookSourceName" / "sourceName": ... } 对象
+    json_obj_matches = re.findall(r"\{[^{}]*(?:\"bookSourceName\"|\"sourceName\"|\"ruleSearch\")[^{}]*\}", text, re.DOTALL)
+    for block in json_obj_matches:
+        try:
+            obj = json.loads(block)
+            item = _extract_source_item(obj, default_name)
+            if item:
+                out.append(item)
+        except Exception:
+            continue
+
+    return out or [(default_name or "自定义书源", "", text)]
+
+
+def split_legado_rules(name: str, text: str) -> list[tuple[str, str]]:
+    sources = parse_sources_from_payload(text, name)
+    return [(s[0], s[2]) for s in sources]
+
+
+def legado_rule_upsert(name: str, source_url: str, rule: str) -> tuple[int, bool]:
+    """
+    智能去重更新或插入书源：
+    如果存在同名或同 URL 的书源，则更新规则；否则插入新书源。
+    返回: (source_id, is_new_insert)
+    """
+    conn = require_db()
+    now = int(time.time() * 1000)
+
+    # 优先根据 url 匹配，其次根据 name 匹配
+    existing = None
+    if source_url:
+        existing = conn.execute("SELECT id FROM book_source WHERE url=?", (source_url,)).fetchone()
+    if not existing and name:
+        existing = conn.execute("SELECT id FROM book_source WHERE name=?", (name,)).fetchone()
+
+    if existing:
+        sid = int(existing["id"])
+        conn.execute(
+            "UPDATE book_source SET name=?, url=?, rule=?, enabled=1 WHERE id=?",
+            (name, source_url, rule, sid),
+        )
+        conn.commit()
+        return sid, False
+
+    cur = conn.execute(
+        "INSERT INTO book_source (name, url, rule, enabled, create_time) VALUES (?, ?, ?, 1, ?)",
+        (name, source_url, rule, now),
+    )
+    conn.commit()
+    return int(cur.lastrowid), True
 
 
 def legado_rule_insert(name: str, rule: str) -> int:
-    conn = require_db()
-    now = int(time.time() * 1000)
-    cur = conn.execute(
-        "INSERT INTO book_source (name, url, rule, create_time) VALUES (?, '', ?, ?)",
-        (name, rule, now),
-    )
-    conn.commit()
-    return int(cur.lastrowid)
+    sid, _ = legado_rule_upsert(name, "", rule)
+    return sid
 
 
 def abs_url(base: str, href: str) -> str:
@@ -284,37 +388,198 @@ def _or_default(s: str, d: str) -> str:
 _JS_POS = re.compile(r"\.(\d{1,2})\s*$")  # 行尾 `.N` 位置下标
 
 
-def _strip_js_pos(selector: str) -> tuple[str, int | None]:
-    """若选择器末尾是 `.N` 位置下标，返回 (基础选择器, N)。"""
-    m = _JS_POS.search((selector or "").strip())
-    if m:
-        base = (selector[: m.start()]).strip()
-        return base, int(m.group(1))
-    return selector, None
+def _strip_js_pos_and_slice(selector: str) -> tuple[str, int | None, tuple[int | None, int | None] | None]:
+    """
+    处理 Legado 3.0 选择器末尾的位置下标与切片：
+    例如：
+      .author.0        -> ('.author', 0, None)
+      div#info > p.0   -> ('div#info > p', 0, None)
+      div.con_top > a.1-> ('div.con_top > a', 1, None)
+      dd[9:]           -> ('dd', None, (9, None))
+      dd[0]            -> ('dd', 0, None)
+    """
+    s = (selector or "").strip()
+    if not s:
+        return "", None, None
+
+    # 1. 检查方括号切片 [9:] 或 [0]
+    slice_m = re.search(r"\[(-?\d*):?(-?\d*)\]\s*$", s)
+    if slice_m:
+        base = s[: slice_m.start()].strip()
+        s1, s2 = slice_m.group(1), slice_m.group(2)
+        if ":" in slice_m.group(0):
+            start = int(s1) if s1 else None
+            stop = int(s2) if s2 else None
+            return base, None, (start, stop)
+        else:
+            return base, int(s1) if s1 else None, None
+
+    # 2. 检查末尾 `.N` 或 `.-N`
+    pos_m = re.search(r"\.(-?\d{1,3})\s*$", s)
+    if pos_m:
+        base = s[: pos_m.start()].strip()
+        return base, int(pos_m.group(1)), None
+
+    return s, None, None
 
 
 def safe_select(el: Tag, selector: str) -> list[Tag]:
     if not (selector or "").strip():
         return []
+    selector = selector.strip()
+
+    # 支持 || fallback 规则
+    if "||" in selector:
+        for part in selector.split("||"):
+            res = safe_select(el, part.strip())
+            if res:
+                return res
+        return []
+
+    # 支持 && / %% 组合规则（拼接多个选择器的匹配结果）
+    if "&&" in selector or "%%" in selector:
+        parts = [p.strip() for p in re.split(r"&&|%%", selector) if p.strip()]
+        out = []
+        for p in parts:
+            out.extend(safe_select(el, p))
+        return out
+
+    base, pos_idx, slice_args = _strip_js_pos_and_slice(selector)
     try:
-        return list(el.select(selector))
+        found = list(el.select(base)) if base else [el]
     except Exception:
         return []
 
+    if slice_args is not None:
+        start, stop = slice_args
+        return found[slice(start, stop)]
+
+    if pos_idx is not None and found:
+        if 0 <= pos_idx < len(found):
+            return [found[pos_idx]]
+        elif pos_idx < 0 and abs(pos_idx) <= len(found):
+            return [found[pos_idx]]
+        return []
+
+    return found
+
 
 def safe_select_one(el: Tag, selector: str) -> Tag | None:
-    if not (selector or "").strip():
-        return None
-    base, pos = _strip_js_pos(selector)
-    found = safe_select(el, base)
-    if not found:
-        return None
-    if pos is not None:
-        # jsoup 位置下标从 1 开始；越界取两端
-        if 1 <= pos <= len(found):
-            return found[pos - 1]
-        return found[0] if pos == 1 else None
-    return found[0]
+    found = safe_select(el, selector)
+    return found[0] if found else None
+
+
+def fetch_search_response(search_spec: str, keyword: str, timeout: int = 15) -> tuple[str, str]:
+    """
+    支持 Legado 3.0 标准的 searchUrl 规范：
+    1. 简单 GET URL: https://example.com/s?q={{key}}
+    2. 带 JSON 配置的高级格式:
+       https://example.com/s.php,{
+         "method": "POST",
+         "body": "keyword={{key}}&t=1",
+         "charset": "UTF-8",
+         "headers": { ... }
+       }
+    """
+    import urllib.parse
+
+    search_spec = (search_spec or "").strip()
+    if not search_spec:
+        raise ValueError("searchUrl 为空")
+
+    url = search_spec
+    options = {}
+
+    if "," in search_spec:
+        idx = search_spec.find(",")
+        raw_url = search_spec[:idx].strip()
+        raw_json = search_spec[idx + 1:].strip()
+        if raw_json.startswith("{") and raw_json.endswith("}"):
+            try:
+                options = json.loads(raw_json)
+                url = raw_url
+            except Exception:
+                pass
+
+    method = str(options.get("method", "GET")).upper()
+    charset = str(options.get("charset", "UTF-8")).upper()
+
+    # 编码关键词
+    if charset in ("GBK", "GB2312", "GB18030"):
+        try:
+            esc = urllib.parse.quote(keyword.encode(charset.lower()))
+        except Exception:
+            esc = urllib.parse.quote(keyword)
+    else:
+        esc = urllib.parse.quote(keyword)
+
+    def _replace_key(text: str) -> str:
+        if not text:
+            return ""
+        return (
+            text.replace("{{key}}", esc)
+            .replace("{{search}}", esc)
+            .replace("{search}", esc)
+            .replace("{{keyword}}", esc)
+        )
+
+    target_url = _replace_key(url)
+    req_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    }
+    if "headers" in options and isinstance(options["headers"], dict):
+        req_headers.update(options["headers"])
+
+    raw_body = options.get("body")
+
+    if method == "POST":
+        if raw_body is not None:
+            if isinstance(raw_body, dict):
+                body_dict = {}
+                for k, v in raw_body.items():
+                    body_dict[k] = _replace_key(str(v))
+                post_data = body_dict
+            else:
+                post_data = _replace_key(str(raw_body))
+                if "Content-Type" not in req_headers:
+                    req_headers["Content-Type"] = "application/x-www-form-urlencoded"
+        else:
+            post_data = f"keyword={esc}"
+            if "Content-Type" not in req_headers:
+                req_headers["Content-Type"] = "application/x-www-form-urlencoded"
+
+        resp = cffi_requests.post(
+            target_url,
+            data=post_data,
+            headers=req_headers,
+            impersonate="chrome120",
+            timeout=timeout,
+            proxy=get_proxy() or None,
+        )
+    else:
+        # GET 请求
+        if "?" not in target_url and ("{{key}}" not in search_spec and "{search}" not in search_spec):
+            target_url = f"{target_url}?keyword={esc}"
+        resp = cffi_requests.get(
+            target_url,
+            headers=req_headers,
+            impersonate="chrome120",
+            timeout=timeout,
+            proxy=get_proxy() or None,
+        )
+
+    content = resp.content
+    try:
+        if charset in ("GBK", "GB2312", "GB18030"):
+            html = content.decode(charset.lower(), errors="replace")
+        else:
+            html = resp.text
+            if "charset=gbk" in html.lower() or "charset=gb2312" in html.lower():
+                html = content.decode("gbk", errors="replace")
+    except Exception:
+        html = resp.text
+
+    return html, str(resp.url or target_url)
 
 
 def normalize_extract_rule(rule: str, default: str) -> str:
@@ -334,8 +599,13 @@ def extract_value(el: Tag | None, rule: str, base_url: str) -> str:
     if not rule:
         return ""
 
+    # 分离基础规则与 ## 正则替换部分
+    parts = rule.split("##")
+    base_rule = parts[0].strip()
+    replacements = parts[1:]
+
     def _attr(target: Tag, attr: str) -> str:
-        attr = attr.split("##")[0].strip()  # strip ## part for attr name
+        attr = attr.strip()
         if attr in ("text", "textN", "textNodes", "ownText"):
             return target.get_text(separator="", strip=True)
         if attr == "html":
@@ -345,38 +615,37 @@ def extract_value(el: Tag | None, rule: str, base_url: str) -> str:
             v = v[0] if v else ""
         return abs_url(base_url, str(v).strip())
 
-    # 处理 @attr + ## 替换
-    if "@" in rule:
-        css, attr = rule.rsplit("@", 1)
+    val = ""
+    # 1. @attr 提取
+    if "@" in base_rule:
+        css, attr = base_rule.rsplit("@", 1)
         css, attr = css.strip(), attr.strip()
         target: Tag | None = el
         if css:
             target = safe_select_one(el, css)
-        if target is None:
-            return ""
-        text = _attr(target, attr)
+        if target is not None:
+            val = _attr(target, attr)
+    # 2. 特殊纯文本/HTML提取
+    elif base_rule in ("text", "textN", "textNodes", "ownText", ""):
+        val = el.get_text(separator="", strip=True)
+    elif base_rule == "html":
+        val = "".join(str(c) for c in el.contents).strip()
+    # 3. 普通 CSS 选择器 fallback
+    else:
+        found = safe_select_one(el, base_rule)
+        val = found.get_text(separator="", strip=True) if found is not None else ""
 
-        # 处理 ## 替换规则
-        if "##" in rule:
-            parts = rule.split("##")
-            if len(parts) >= 3:
-                regex, repl = parts[1], parts[2]
-                text = re.sub(regex, repl, text)
-            elif len(parts) == 2:
-                regex = parts[1]
-                text = re.split(regex, text, 1)[0]
+    # 执行 ## 正则替换
+    val = str(val)
+    for i in range(0, len(replacements), 2):
+        pattern = replacements[i]
+        repl = replacements[i + 1] if i + 1 < len(replacements) else ""
+        try:
+            val = re.sub(pattern, repl, val)
+        except Exception:
+            pass
 
-        return text
-
-    # fallback
-    if rule in ("text", "textN", "textNodes", "ownText"):
-        return el.get_text(separator="", strip=True)
-    if rule == "html":
-        return "".join(str(c) for c in el.contents).strip()
-
-    # 普通 CSS 选择器 fallback
-    found = safe_select_one(el, rule)
-    return found.get_text(separator="", strip=True) if found is not None else ""
+    return val.strip()
 
 
 def crawl_search(html: str, rule: SearchRule | None, base_url: str) -> list[dict]:
@@ -433,16 +702,20 @@ def crawl_toc(html: str, rule: TocRule | None, base_url: str) -> list[dict]:
     except Exception:
         soup = BeautifulSoup(html, "html.parser")
     out: list[dict] = []
+    seen = set()
     root = soup if isinstance(soup, Tag) else soup
     for s in safe_select(root, rule.selector):
-        out.append(
-            {
-                "title": extract_value(s, _or_default(rule.title, "text"), base_url),
-                "chapterUrl": extract_value(
-                    s, normalize_extract_rule(rule.chapter_url, "@href"), base_url
-                ),
-            }
-        )
+        title = extract_value(s, _or_default(rule.title, "text"), base_url).strip()
+        url = extract_value(
+            s, normalize_extract_rule(rule.chapter_url, "@href"), base_url
+        ).strip()
+        if not title and not url:
+            continue
+        key = url if url else title
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"title": title, "chapterUrl": url})
     return out
 
 
@@ -456,8 +729,15 @@ def crawl_content(html: str, rule: ContentRule | None) -> str:
     if not rule.selector:
         return soup.get_text(separator="\n", strip=True)
     root = soup if isinstance(soup, Tag) else soup
-    el = safe_select_one(root, rule.selector)
-    return extract_value(el, _or_default(rule.text, "text"), "")
+    elems = safe_select(root, rule.selector)
+    if not elems:
+        return ""
+    paragraphs = []
+    for el in elems:
+        p_text = extract_value(el, _or_default(rule.text, "text"), "")
+        if p_text:
+            paragraphs.append(p_text)
+    return "\n".join(paragraphs)
 
 
 def source_by_id(sid: int) -> dict | None:

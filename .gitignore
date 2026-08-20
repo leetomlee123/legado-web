@@ -5,10 +5,12 @@ dist/
 
 # 运行时数据
 backend/data/
+data/*.db-shm
+data/*.db-wal
 
 # 系统
 .DS_Store
 .env
 
 .venv/
-__pycache__
+__pycache__/

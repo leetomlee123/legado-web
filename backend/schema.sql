@@ -3,6 +3,7 @@
 -- 书籍表
 CREATE TABLE IF NOT EXISTS book (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid          TEXT    DEFAULT '',          -- 前端预生成的 UUID，搜索结果坑位唯一标识
     name          TEXT    NOT NULL,
     author        TEXT    DEFAULT '',
     cover         TEXT    DEFAULT '',          -- 封面URL或本地路径
@@ -12,12 +13,14 @@ CREATE TABLE IF NOT EXISTS book (
     source_id     INTEGER DEFAULT 0,           -- 来源书源id
     local_path    TEXT    DEFAULT '',          -- 本地文件路径（txt/epub/pdf）
     book_group    TEXT    DEFAULT '默认分组',
+    in_bookcase   INTEGER DEFAULT 1,           -- 1=显示在书架, 0=预览模式不入架
     last_read_time INTEGER DEFAULT 0,          -- 最近阅读时间戳
     create_time   INTEGER DEFAULT 0,
     has_update    INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_book_name ON book (name);
 CREATE INDEX IF NOT EXISTS idx_book_group ON book (book_group);
+
 
 -- 章节表
 CREATE TABLE IF NOT EXISTS chapter (

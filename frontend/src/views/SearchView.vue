@@ -1,216 +1,1409 @@
 <template>
-  <div class="search-page">
-    <div class="search-bar">
-      <el-input
-        v-model="keyword"
-        placeholder="输入书名 / 作者，回车搜索"
-        clearable
-        size="large"
-        @keyup.enter="doSearch"
-      >
-        <template #prefix><el-icon><Search /></el-icon></template>
-      </el-input>
-      <el-button
-        type="primary"
-        size="large"
-        :loading="searching"
-        @click="doSearch"
-      >
-        搜索
-      </el-button>
-    </div>
-
-    <div v-if="keyword && !searching" class="hint">
-      按下回车或点击搜索，将在已启用的书源中查找「{{ keyword }}」
-    </div>
-
-    <template v-if="results.length">
-      <div
-        v-for="group in results"
-        :key="group.sourceId"
-        class="source-group"
-      >
-        <div class="source-label">
-          {{ group.sourceName }}
-          <span class="count">{{ group.books.length }} 本</span>
+  <section class="search-page" aria-label="书籍搜索">
+    <!-- 搜索区域 -->
+    <div class="search-hero">
+      <h2 class="search-heading">多源流式加权搜索</h2>
+      <p class="search-sub">实时并发检索各书源，按相关度权重动态精准排序</p>
+      
+      <!-- 搜索主输入栏 -->
+      <div class="search-bar" role="search">
+        <div class="search-field">
+          <span class="search-field-icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+            </svg>
+          </span>
+          <input
+            id="search-keyword-input"
+            v-model="keyword"
+            type="search"
+            class="search-input"
+            placeholder="输入书名、作者或关键词..."
+            aria-label="输入书名或作者"
+            @keyup.enter="startStreamSearch"
+          />
         </div>
-        <div class="result-grid">
-          <div
-            v-for="b in group.books"
-            :key="b.id"
-            class="result-card"
-            @click="open(b)"
+        
+        <!-- 搜索 / 停止 按钮 -->
+        <button
+          v-if="!searching"
+          id="search-submit-btn"
+          class="btn-search"
+          aria-label="搜索"
+          @click="startStreamSearch"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+          </svg>
+          搜索
+        </button>
+
+        <button
+          v-else
+          id="search-stop-btn"
+          class="btn-search btn-stop"
+          aria-label="停止搜索"
+          @click="stopSearch"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="5" y="5" width="14" height="14" rx="2"/>
+          </svg>
+          停止
+        </button>
+      </div>
+
+      <!-- ── 可折叠书源选择器栏 ──────────────────────────────── -->
+      <div v-if="allSources.length" class="source-collapse-container">
+        <!-- 紧凑概要条 -->
+        <div class="source-summary-bar">
+          <div class="summary-left">
+            <span class="filter-label">检索书源：</span>
+            <button
+              class="source-chip main-all-chip"
+              :class="{ active: isAllSelected }"
+              @click="toggleSelectAll"
+            >
+              全部 ({{ selectedSourceIds.length }}/{{ allSources.length }})
+            </button>
+
+            <!-- 折叠状态下仅展示前几个常用源 -->
+            <template v-if="!isSourceFilterExpanded">
+              <button
+                v-for="s in visibleSourcesCompact"
+                :key="s.id"
+                class="source-chip"
+                :class="{ active: selectedSourceIds.includes(s.id!) }"
+                @click="toggleSource(s.id!)"
+              >
+                {{ s.name }}
+              </button>
+            </template>
+          </div>
+
+          <button
+            class="btn-toggle-expand"
+            :class="{ expanded: isSourceFilterExpanded }"
+            @click="isSourceFilterExpanded = !isSourceFilterExpanded"
           >
-            <img v-if="b.cover" :src="b.cover" class="thumb" />
-            <div v-else class="thumb thumb-placeholder">{{ b.name.slice(0, 3) }}</div>
-            <div class="r-info">
-              <div class="r-name">{{ b.name }}</div>
-              <div class="r-author">{{ b.author || '未知' }}</div>
-              <div class="r-intro" v-if="b.intro">{{ b.intro }}</div>
+            <span>{{ isSourceFilterExpanded ? '收起书源 ▲' : `更多书源 (${allSources.length}) ▼` }}</span>
+          </button>
+        </div>
+
+        <!-- 展开后的完整书源选择面板 -->
+        <div v-if="isSourceFilterExpanded" class="source-expanded-panel">
+          <div class="panel-header-tools">
+            <input
+              v-model="sourceSearchInput"
+              type="search"
+              class="source-search-input"
+              placeholder="🔍 快速过滤书源名称..."
+            />
+            <div class="panel-action-btns">
+              <button class="btn-text" @click="selectAllSources">全选</button>
+              <span class="btn-sep">|</span>
+              <button class="btn-text" @click="invertSelectSources">反选</button>
+              <span class="btn-sep">|</span>
+              <button class="btn-text" @click="clearSelectSources">清空</button>
+            </div>
+          </div>
+
+          <div class="source-chips-grid">
+            <button
+              v-for="s in filteredSourcesInPanel"
+              :key="s.id"
+              class="source-chip chip-item"
+              :class="{ active: selectedSourceIds.includes(s.id!) }"
+              @click="toggleSource(s.id!)"
+            >
+              <span class="chip-name">{{ s.name }}</span>
+            </button>
+            <div v-if="!filteredSourcesInPanel.length" class="no-matched-source">
+              未找到匹配的书源
             </div>
           </div>
         </div>
       </div>
-    </template>
 
-    <el-empty v-else-if="searched && !searching" description="没有找到相关书籍" />
+      <!-- SSE 实时流式搜索进度与统计栏 -->
+      <div v-if="searching || searched" class="search-progress-box">
+        <div class="progress-info">
+          <span class="progress-text">
+            <span v-if="searching" class="spin-dot"></span>
+            <span v-if="searching">
+              正在检索 ({{ completedSources }}/{{ totalSources }})...
+            </span>
+            <span v-else class="done-text">
+              ✓ 检索完成 ({{ completedSources }}/{{ totalSources }} 个书源)
+            </span>
+          </span>
 
-    <el-skeleton v-if="searching" :rows="5" animated />
-  </div>
+          <div class="progress-right">
+            <span class="found-counter">
+              共找到 <strong>{{ totalBooksFound }}</strong> 本书
+            </span>
+
+            <!-- 分组模式下的全局折叠/展开按钮 -->
+            <div v-if="viewMode === 'grouped' && results.length" class="group-collapse-tools">
+              <button class="btn-collapse-all" @click="toggleCollapseAllGroups">
+                {{ isAllGroupsCollapsed ? '全部展开 ▼' : '全部折叠 ▲' }}
+              </button>
+            </div>
+
+            <!-- 排序与视图切换 -->
+            <div class="view-mode-toggle" role="tablist">
+              <button
+                class="btn-mode"
+                :class="{ active: viewMode === 'weighted' }"
+                title="按相关度加权综合排序"
+                @click="viewMode = 'weighted'"
+              >
+                🎯 综合加权
+              </button>
+              <button
+                class="btn-mode"
+                :class="{ active: viewMode === 'grouped' }"
+                title="按书源分组折叠展示"
+                @click="viewMode = 'grouped'"
+              >
+                📑 按源分组
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="progress-track" v-if="searching">
+          <div
+            class="progress-bar"
+            :style="{ width: `${totalSources ? (completedSources / totalSources) * 100 : 0}%` }"
+          ></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 模式 1：综合加权排序视图（默认推荐） -->
+    <div v-if="results.length && viewMode === 'weighted'" class="weighted-results-container">
+      <div class="result-list">
+        <article
+          v-for="(b, idx) in weightedBooks"
+          :key="b.uuid || b.id || (b.name + b.sourceName + idx)"
+          class="result-card"
+          @click="open(b)"
+          :aria-label="`查看《${b.name}》`"
+          tabindex="0"
+          @keydown.enter="open(b)"
+        >
+          <!-- 封面 -->
+          <div class="thumb-wrap">
+            <img
+              v-if="b.cover && !failedCovers.has(b.uuid || b.name)"
+              :src="b.cover"
+              class="thumb"
+              :alt="`《${b.name}》封面`"
+              loading="lazy"
+              @error="handleCoverError(b)"
+            />
+            <div v-else class="thumb thumb-placeholder" :style="resultPlaceholderStyle(b.name)" aria-hidden="true">
+              <span class="thumb-text">{{ (b.name || '书').slice(0, 4) }}</span>
+            </div>
+          </div>
+
+          <!-- 书籍信息 -->
+          <div class="r-info">
+            <div class="r-top-row">
+              <div class="r-name" v-html="highlightKeyword(b.name)"></div>
+              
+              <!-- 来源标签与加权标签 -->
+              <div class="r-tags">
+                <span v-if="b.matchLevel === 'exact'" class="tag-match exact">精准完全匹配</span>
+                <span v-else-if="b.matchLevel === 'prefix'" class="tag-match prefix">书名开头匹配</span>
+                <span v-else-if="b.matchLevel === 'author'" class="tag-match author">作者匹配</span>
+                <span class="source-badge">{{ b.sourceName }}</span>
+              </div>
+            </div>
+
+            <div class="r-author" v-html="highlightKeyword(b.author || '作者不详')"></div>
+            <p v-if="b.intro" class="r-intro">{{ b.intro }}</p>
+          </div>
+
+          <div class="r-arrow" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="9 18 15 12 9 6"/>
+            </svg>
+          </div>
+        </article>
+      </div>
+    </div>
+
+    <!-- 模式 2：按书源分组折叠视图 -->
+    <div v-else-if="results.length && viewMode === 'grouped'" class="results-container">
+      <div
+        v-for="group in sortedResultsByGroup"
+        :key="group.sourceId"
+        class="source-group"
+        :class="{ collapsed: collapsedGroupIds.has(group.sourceId) }"
+      >
+        <!-- 可点击折叠/展开的书源标题栏 -->
+        <div
+          class="source-header clickable-header"
+          @click="toggleGroupCollapse(group.sourceId)"
+          :title="collapsedGroupIds.has(group.sourceId) ? '点击展开该书源' : '点击折叠该书源'"
+        >
+          <div class="source-header-left">
+            <span class="collapse-caret" :class="{ rotated: !collapsedGroupIds.has(group.sourceId) }">
+              ▶
+            </span>
+            <span class="source-tag">{{ group.sourceName }}</span>
+            <span v-if="group.error" class="source-err-badge" :title="group.error">
+              抓取异常
+            </span>
+          </div>
+          <div class="source-header-right">
+            <span class="source-count">{{ group.books.length }} 本</span>
+            <span class="collapse-tip-text">
+              {{ collapsedGroupIds.has(group.sourceId) ? '展开' : '折叠' }}
+            </span>
+          </div>
+        </div>
+
+        <!-- 展开内容 -->
+        <div v-show="!collapsedGroupIds.has(group.sourceId)">
+          <div v-if="group.books.length" class="result-list">
+            <article
+              v-for="b in group.books"
+              :key="b.uuid || b.id || b.name"
+              class="result-card"
+              @click="open(b)"
+              :aria-label="`查看《${b.name}》`"
+              tabindex="0"
+              @keydown.enter="open(b)"
+            >
+              <div class="thumb-wrap">
+                <img
+                  v-if="b.cover && !failedCovers.has(b.uuid || b.name)"
+                  :src="b.cover"
+                  class="thumb"
+                  :alt="`《${b.name}》封面`"
+                  loading="lazy"
+                  @error="handleCoverError(b)"
+                />
+                <div v-else class="thumb thumb-placeholder" :style="resultPlaceholderStyle(b.name)" aria-hidden="true">
+                  <span class="thumb-text">{{ (b.name || '书').slice(0, 4) }}</span>
+                </div>
+              </div>
+              <div class="r-info">
+                <div class="r-name" v-html="highlightKeyword(b.name)"></div>
+                <div class="r-author" v-html="highlightKeyword(b.author || '作者不详')"></div>
+                <p v-if="b.intro" class="r-intro">{{ b.intro }}</p>
+              </div>
+              <div class="r-arrow" aria-hidden="true">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="9 18 15 12 9 6"/>
+                </svg>
+              </div>
+            </article>
+          </div>
+          <div v-else-if="group.error" class="source-empty-hint">
+            {{ group.error }}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 无结果提示 -->
+    <div v-else-if="searched && !searching" class="empty-result" aria-live="polite">
+      <div class="empty-icon" aria-hidden="true">
+        <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8" stroke="var(--color-accent)" opacity="0.4"/>
+          <path d="m21 21-4.35-4.35" stroke="var(--color-accent)" opacity="0.4"/>
+          <line x1="8" y1="11" x2="14" y2="11" stroke="var(--color-text-muted)" stroke-width="1.5"/>
+        </svg>
+      </div>
+      <p class="empty-title">未找到「{{ lastKeyword }}」相关内容</p>
+      <p class="empty-desc">请检查书源规则或更换关键词再试</p>
+    </div>
+
+    <!-- 搜索初始加载骨架屏 -->
+    <div v-if="searching && !results.length" class="skeleton-list" aria-hidden="true">
+      <div v-for="n in 4" :key="n" class="skeleton-card">
+        <div class="skeleton-thumb"></div>
+        <div class="skeleton-lines">
+          <div class="sk-line"></div>
+          <div class="sk-line sk-short"></div>
+          <div class="sk-line sk-shorter"></div>
+        </div>
+      </div>
+    </div>
+  </section>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Search } from '@element-plus/icons-vue'
-import { searchAll, listSources } from '@/api'
-import type { SourceSearchRes, Book } from '@/types'
+import { searchStream, listSources, initBookPreview } from '@/api'
+import type { SourceSearchRes, Book, BookSource } from '@/types'
 
 const router = useRouter()
+
 const keyword = ref('')
+const lastKeyword = ref('')
 const results = ref<SourceSearchRes[]>([])
 const searching = ref(false)
 const searched = ref(false)
+const failedCovers = ref<Set<string>>(new Set())
 
-async function doSearch() {
+// 视图排序模式：'weighted' (综合加权) | 'grouped' (按源分组折叠)
+const viewMode = ref<'weighted' | 'grouped'>('weighted')
+
+// 书源折叠状态
+const isSourceFilterExpanded = ref(false)
+const sourceSearchInput = ref('')
+const collapsedGroupIds = ref<Set<number>>(new Set())
+
+// 书源筛选
+const allSources = ref<BookSource[]>([])
+const selectedSourceIds = ref<number[]>([])
+
+// 流式统计
+const totalSources = ref(0)
+const completedSources = ref(0)
+let abortFn: (() => void) | null = null
+
+const isAllSelected = computed(() => {
+  return selectedSourceIds.value.length === allSources.value.length
+})
+
+const visibleSourcesCompact = computed(() => {
+  return allSources.value.slice(0, 5)
+})
+
+const filteredSourcesInPanel = computed(() => {
+  const q = sourceSearchInput.value.trim().toLowerCase()
+  if (!q) return allSources.value
+  return allSources.value.filter((s) => s.name.toLowerCase().includes(q))
+})
+
+const totalBooksFound = computed(() => {
+  return results.value.reduce((acc, cur) => acc + (cur.books?.length || 0), 0)
+})
+
+const isAllGroupsCollapsed = computed(() => {
+  if (!results.value.length) return false
+  return results.value.every((g) => collapsedGroupIds.value.has(g.sourceId))
+})
+
+// ── 智能相关度加权算法 ─────────────────────────────────────
+type MatchLevel = 'exact' | 'prefix' | 'author' | 'contains' | 'other'
+
+interface ScoredBook extends Book {
+  sourceName: string
+  score: number
+  matchLevel: MatchLevel
+}
+
+function computeRelevance(book: Book, kw: string): { score: number; matchLevel: MatchLevel } {
+  const q = kw.trim().toLowerCase()
+  if (!q) return { score: 0, matchLevel: 'other' }
+
+  const name = (book.name || '').trim().toLowerCase()
+  const author = (book.author || '').trim().toLowerCase()
+  const intro = (book.intro || '').trim().toLowerCase()
+
+  let score = 0
+  let matchLevel: MatchLevel = 'other'
+
+  if (name === q) {
+    score += 1200
+    matchLevel = 'exact'
+  } else if (name.startsWith(q)) {
+    score += 700
+    matchLevel = 'prefix'
+    score += Math.max(0, 50 - (name.length - q.length) * 2)
+  } else if (name.includes(q)) {
+    score += 400
+    matchLevel = 'contains'
+    score += Math.max(0, 30 - (name.length - q.length) * 2)
+  }
+
+  if (author === q) {
+    score += 600
+    if (matchLevel === 'other') matchLevel = 'author'
+  } else if (author.includes(q)) {
+    score += 250
+    if (matchLevel === 'other') matchLevel = 'author'
+  }
+
+  if (intro.includes(q)) {
+    score += 50
+  }
+
+  if (book.cover) score += 15
+  if (book.intro && book.intro.length > 20) score += 10
+
+  return { score, matchLevel }
+}
+
+/** 综合加权排序后的所有书籍列表 */
+const weightedBooks = computed<ScoredBook[]>(() => {
+  const kw = lastKeyword.value || keyword.value
+  const list: ScoredBook[] = []
+
+  for (const group of results.value) {
+    for (const b of group.books || []) {
+      const { score, matchLevel } = computeRelevance(b, kw)
+      list.push({
+        ...b,
+        sourceName: group.sourceName,
+        score,
+        matchLevel,
+      })
+    }
+  }
+
+  return list.sort((a, b) => b.score - a.score)
+})
+
+/** 分组模式下每组内部也按权重排序 */
+const sortedResultsByGroup = computed(() => {
+  const kw = lastKeyword.value || keyword.value
+  return results.value.map((group) => {
+    const sorted = [...(group.books || [])].sort((a, b) => {
+      return computeRelevance(b, kw).score - computeRelevance(a, kw).score
+    })
+    return {
+      ...group,
+      books: sorted,
+    }
+  })
+})
+
+function highlightKeyword(text: string): string {
+  const kw = (lastKeyword.value || keyword.value).trim()
+  if (!kw || !text) return text || ''
+  const regex = new RegExp(`(${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi')
+  return text.replace(regex, '<span class="kw-hl">$1</span>')
+}
+
+function toggleSelectAll() {
+  if (isAllSelected.value) {
+    selectedSourceIds.value = []
+  } else {
+    selectedSourceIds.value = allSources.value.map((s) => s.id!)
+  }
+}
+
+function selectAllSources() {
+  selectedSourceIds.value = allSources.value.map((s) => s.id!)
+}
+
+function invertSelectSources() {
+  const currentSet = new Set(selectedSourceIds.value)
+  selectedSourceIds.value = allSources.value
+    .map((s) => s.id!)
+    .filter((id) => !currentSet.has(id))
+}
+
+function clearSelectSources() {
+  selectedSourceIds.value = []
+}
+
+function toggleSource(id: number) {
+  const idx = selectedSourceIds.value.indexOf(id)
+  if (idx > -1) {
+    selectedSourceIds.value.splice(idx, 1)
+  } else {
+    selectedSourceIds.value.push(id)
+  }
+}
+
+function toggleGroupCollapse(sourceId: number) {
+  if (collapsedGroupIds.value.has(sourceId)) {
+    collapsedGroupIds.value.delete(sourceId)
+  } else {
+    collapsedGroupIds.value.add(sourceId)
+  }
+}
+
+function toggleCollapseAllGroups() {
+  if (isAllGroupsCollapsed.value) {
+    collapsedGroupIds.value.clear()
+  } else {
+    results.value.forEach((g) => collapsedGroupIds.value.add(g.sourceId))
+  }
+}
+
+function handleCoverError(book: Book) {
+  failedCovers.value.add(book.uuid || book.name)
+}
+
+function generateUUID(): string {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID()
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0
+    const v = c === 'x' ? r : (r & 0x3) | 0x8
+    return v.toString(16)
+  })
+}
+
+const GRADIENTS = [
+  ['#c0692e', '#8b3a10'],
+  ['#2e7d6e', '#1a4a42'],
+  ['#b8863a', '#7a5520'],
+  ['#5c4a8a', '#3a2e5c'],
+  ['#2e6b8a', '#1a3d52'],
+  ['#8a4a2e', '#5c2810'],
+]
+
+function resultPlaceholderStyle(name: string): Record<string, string> {
+  const idx = name.charCodeAt(0) % GRADIENTS.length
+  const [from, to] = GRADIENTS[idx]
+  return { background: `linear-gradient(145deg, ${from}, ${to})` }
+}
+
+async function loadSources() {
+  try {
+    const list = await listSources()
+    allSources.value = list.filter((s) => s.enabled)
+    selectedSourceIds.value = allSources.value.map((s) => s.id!)
+  } catch (e) {
+    console.debug('获取书源列表失败:', e)
+  }
+}
+
+/** 启动 SSE 流式多源并发搜索 */
+function startStreamSearch() {
   const kw = keyword.value.trim()
-  if (!kw) return
+  if (!kw) {
+    ElMessage.warning('请输入搜索关键字')
+    return
+  }
+
+  // 停止先前的未完成搜索
+  if (abortFn) {
+    abortFn()
+    abortFn = null
+  }
+
   searching.value = true
   searched.value = true
+  lastKeyword.value = kw
   results.value = []
-  try {
-    // 获取所有启用书源
-    const sources = await listSources()
-    const enabled = sources.filter((s) => s.enabled).map((s) => s.id)
-    const res = await searchAll(kw, enabled)
-    results.value = Array.isArray(res) ? res : res?.data || []
-  } catch (e: any) {
-    ElMessage.error(e.message || '搜索失败')
-  } finally {
-    searching.value = false
+  collapsedGroupIds.value.clear()
+  completedSources.value = 0
+  totalSources.value = selectedSourceIds.value.length || allSources.value.length
+
+  const filterIds = selectedSourceIds.value.length ? selectedSourceIds.value : undefined
+
+  abortFn = searchStream(
+    kw,
+    filterIds,
+    (evt) => {
+      if (evt.type === 'start') {
+        totalSources.value = evt.totalSources || 0
+      } else if (evt.type === 'source_result') {
+        completedSources.value = evt.completed || (completedSources.value + 1)
+        totalSources.value = evt.totalSources || totalSources.value
+
+        const rawBooks = evt.books || []
+        rawBooks.forEach((b: Book) => {
+          if (!b.uuid) {
+            b.uuid = generateUUID()
+          }
+        })
+
+        if (rawBooks.length > 0 || evt.error) {
+          results.value.push({
+            sourceId: evt.sourceId!,
+            sourceName: evt.sourceName || '未知书源',
+            books: rawBooks,
+            error: evt.error,
+          })
+
+          // 遇到异常或空结果时，默认自动收起该书源以节省空间
+          if (evt.error || rawBooks.length === 0) {
+            collapsedGroupIds.value.add(evt.sourceId!)
+          }
+        }
+      } else if (evt.type === 'done') {
+        searching.value = false
+      }
+    },
+    () => {
+      searching.value = false
+      abortFn = null
+    },
+    (err) => {
+      searching.value = false
+      abortFn = null
+      console.warn('搜索流结束:', err)
+    }
+  )
+}
+
+function stopSearch() {
+  if (abortFn) {
+    abortFn()
+    abortFn = null
   }
+  searching.value = false
+  ElMessage.info('已停止剩余书源检索')
 }
 
 async function open(book: Book) {
-  if (book.id) {
-    router.push({ name: 'read', params: { book: String(book.id) } })
+  const bookAny = book as any
+  const bookUrl: string = bookAny.bookUrl || bookAny.source_url || bookAny.sourceUrl || ''
+  const sourceId: number = Number(bookAny.sourceId || bookAny.source_id || 0)
+
+  if (!bookUrl || !sourceId) {
+    ElMessage.warning('该书籍缺少地址信息，无法直接阅读')
     return
   }
-  // 网络书源结果需先加入书架，再跳转到阅读页
+
+  const uuid = book.uuid || generateUUID()
+  book.uuid = uuid
+
   try {
-    const res = await fetch('/api/books/from-search', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(book),
+    const saved = await initBookPreview({
+      uuid,
+      name: book.name,
+      author: book.author || '',
+      cover: book.cover || '',
+      intro: book.intro || '',
+      bookUrl,
+      sourceId,
+      inBookcase: false,
     })
-    const data = await res.json()
-    if (data.id) {
-      router.push({ name: 'read', params: { book: String(data.id) } })
-    } else {
-      ElMessage.error(data.message || '加入书架失败')
-    }
+
+    router.push({ name: 'read', params: { book: saved.uuid || uuid } })
   } catch (e: any) {
-    ElMessage.error(e.message || '加入书架失败')
+    router.push({ name: 'read', params: { book: uuid } })
   }
 }
+
+onMounted(() => {
+  loadSources()
+})
+
+onUnmounted(() => {
+  if (abortFn) {
+    abortFn()
+  }
+})
 </script>
 
 <style scoped>
+/* ─── 页面容器 ────────────────────────────────────────────── */
 .search-page {
-  padding: 24px;
-  max-width: 800px;
+  max-width: 840px;
   margin: 0 auto;
+  padding: 32px 24px 64px;
+}
+
+/* ─── 搜索英雄区 ──────────────────────────────────────────── */
+.search-hero {
+  text-align: center;
+  margin-bottom: 28px;
+}
+
+.search-heading {
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  letter-spacing: -0.02em;
+  margin: 0 0 6px;
+}
+
+.search-sub {
+  font-size: 14px;
+  color: var(--color-text-secondary);
+  margin: 0 0 20px;
 }
 
 .search-bar {
   display: flex;
-  gap: 12px;
-  margin-bottom: 10px;
+  gap: 10px;
+  max-width: 660px;
+  margin: 0 auto;
 }
 
-.hint {
-  color: #aaa;
+.search-field {
+  position: relative;
+  flex: 1;
+}
+
+.search-field-icon {
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--color-text-muted);
+  display: flex;
+  align-items: center;
+  pointer-events: none;
+}
+
+.search-input {
+  width: 100%;
+  padding: 12px 14px 12px 44px;
+  border: 1.5px solid var(--color-border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color var(--transition-base), box-shadow var(--transition-base);
+}
+
+.search-input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.search-input:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-pale);
+}
+
+.btn-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 24px;
+  background: var(--color-accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-lg);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--transition-base);
+}
+
+.btn-search:hover {
+  background: var(--color-accent-light);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-accent);
+}
+
+.btn-stop {
+  background: #f5222d;
+}
+
+.btn-stop:hover {
+  background: #ff4d4f;
+}
+
+/* ─── 可折叠书源选择器栏 ────────────────────────────────── */
+.source-collapse-container {
+  max-width: 660px;
+  margin: 16px auto 0;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+  transition: all 0.25s ease;
+}
+
+.source-summary-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  gap: 8px;
+  background: var(--color-surface);
+}
+
+.summary-left {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.filter-label {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.btn-toggle-expand {
+  display: flex;
+  align-items: center;
+  font-size: 11.5px;
+  color: var(--color-accent);
+  background: var(--color-accent-pale);
+  border: 1px solid rgba(184, 134, 58, 0.2);
+  padding: 4px 10px;
+  border-radius: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s ease;
+}
+
+.btn-toggle-expand:hover {
+  background: rgba(184, 134, 58, 0.2);
+}
+
+.btn-toggle-expand.expanded {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+/* 展开后的面板 */
+.source-expanded-panel {
+  padding: 12px 14px 14px;
+  border-top: 1px dashed var(--color-border-subtle);
+  background: var(--color-bg);
+  animation: panelSlide 0.2s ease-out;
+}
+
+@keyframes panelSlide {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.panel-header-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.source-search-input {
+  flex: 1;
+  max-width: 260px;
+  padding: 5px 10px;
+  font-size: 12px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  outline: none;
+}
+
+.source-search-input:focus {
+  border-color: var(--color-accent);
+}
+
+.panel-action-btns {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+}
+
+.btn-text {
+  background: none;
+  border: none;
+  color: var(--color-accent);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.btn-text:hover {
+  text-decoration: underline;
+}
+
+.btn-sep {
+  color: var(--color-text-muted);
+  opacity: 0.4;
+}
+
+.source-chips-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.source-chip {
+  font-size: 11.5px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.source-chip:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.source-chip.active {
+  background: var(--color-accent);
+  color: #ffffff;
+  border-color: var(--color-accent);
+}
+
+.main-all-chip {
+  font-weight: 600;
+}
+
+.no-matched-source {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  padding: 12px 0;
+  width: 100%;
+  text-align: center;
+}
+
+/* ─── 实时进度条与统计 ─────────────────────────────────────── */
+.search-progress-box {
+  max-width: 660px;
+  margin: 18px auto 0;
+  padding: 12px 16px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.progress-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
   font-size: 13px;
-  margin-bottom: 16px;
+  color: var(--color-text-secondary);
+}
+
+.progress-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.group-collapse-tools {
+  display: flex;
+  align-items: center;
+}
+
+.btn-collapse-all {
+  background: none;
+  border: 1px solid var(--color-border-subtle);
+  padding: 3px 8px;
+  font-size: 11.5px;
+  border-radius: 4px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-collapse-all:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.spin-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--color-accent);
+  margin-right: 6px;
+  animation: pulse 1.2s infinite ease-in-out;
+}
+
+@keyframes pulse {
+  0%, 100% { transform: scale(0.8); opacity: 0.5; }
+  50% { transform: scale(1.3); opacity: 1; }
+}
+
+.done-text {
+  color: #52c41a;
+  font-weight: 500;
+}
+
+.found-counter strong {
+  color: var(--color-accent);
+  font-size: 14px;
+}
+
+.view-mode-toggle {
+  display: flex;
+  background: var(--color-bg);
+  padding: 2px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border-subtle);
+  gap: 2px;
+}
+
+.btn-mode {
+  border: none;
+  background: transparent;
+  padding: 3px 8px;
+  font-size: 11.5px;
+  border-radius: 4px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-mode.active {
+  background: var(--color-surface);
+  color: var(--color-accent);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
+
+.progress-track {
+  margin-top: 10px;
+  height: 4px;
+  background: var(--color-bg-subtle);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--color-accent), var(--color-accent-light));
+  transition: width 0.3s ease;
+}
+
+/* ─── 结果列表 ────────────────────────────────────────────── */
+.weighted-results-container,
+.results-container {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
 }
 
 .source-group {
-  margin-top: 24px;
-}
-
-.source-label {
-  font-size: 14px;
-  font-weight: 600;
-  color: #7a2ff0;
-  margin-bottom: 12px;
-  padding-left: 8px;
-  border-left: 3px solid #7a2ff0;
-}
-
-.count {
-  font-weight: 400;
-  color: #bbb;
-  font-size: 12px;
-  margin-left: 6px;
-}
-
-.result-grid {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  transition: all 0.2s ease;
+  animation: fadeIn 0.3s ease-out forwards;
+}
+
+.source-group.collapsed {
+  padding: 10px 16px;
+  background: var(--color-bg);
+  opacity: 0.85;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.clickable-header {
+  cursor: pointer;
+  user-select: none;
+  transition: opacity 0.15s ease;
+}
+
+.clickable-header:hover {
+  opacity: 0.8;
+}
+
+.source-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.source-group.collapsed .source-header {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.source-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.collapse-caret {
+  font-size: 10px;
+  color: var(--color-text-muted);
+  transition: transform 0.2s ease;
+  display: inline-block;
+}
+
+.collapse-caret.rotated {
+  transform: rotate(90deg);
+}
+
+.source-tag {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-accent);
+  background: var(--color-accent-pale);
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+}
+
+.source-err-badge {
+  font-size: 11px;
+  color: #ff4d4f;
+  background: rgba(255, 77, 79, 0.1);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.source-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.source-count {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.collapse-tip-text {
+  font-size: 11px;
+  color: var(--color-accent);
+}
+
+.result-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
 }
 
 .result-card {
   display: flex;
+  align-items: center;
   gap: 14px;
-  background: #fff;
-  border-radius: 10px;
-  padding: 12px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  padding: 12px 16px;
   cursor: pointer;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-  transition: box-shadow 0.15s;
+  transition: all var(--transition-base);
 }
 
 .result-card:hover {
-  box-shadow: 0 4px 16px rgba(122, 47, 240, 0.18);
+  border-color: var(--color-accent);
+  box-shadow: var(--shadow-md), 0 0 0 1px var(--color-accent-glow);
+  transform: translateX(3px);
+}
+
+.result-card:active {
+  transform: translateX(1px);
+}
+
+.thumb-wrap {
+  flex-shrink: 0;
 }
 
 .thumb {
-  width: 56px;
-  height: 76px;
-  border-radius: 6px;
+  width: 52px;
+  height: 70px;
+  border-radius: var(--radius-sm);
   object-fit: cover;
-  flex-shrink: 0;
 }
 
 .thumb-placeholder {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(160deg, #7a2ff0, #5b1fbf);
-  color: #fff;
+  color: rgba(255, 248, 220, 0.9);
   font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.r-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.r-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .r-name {
   font-size: 15px;
   font-weight: 600;
-  color: #2c2c2c;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.r-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.tag-match {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 500;
+}
+
+.tag-match.exact {
+  background: rgba(82, 196, 26, 0.12);
+  color: #52c41a;
+  border: 1px solid rgba(82, 196, 26, 0.25);
+}
+
+.tag-match.prefix {
+  background: var(--color-accent-pale);
+  color: var(--color-accent);
+}
+
+.tag-match.author {
+  background: rgba(24, 144, 255, 0.1);
+  color: #1890ff;
+}
+
+.source-badge {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  background: var(--color-bg-subtle);
+  padding: 1px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--color-border-subtle);
 }
 
 .r-author {
   font-size: 12px;
-  color: #999;
-  margin: 4px 0;
+  color: var(--color-text-secondary);
+  margin: 4px 0 6px;
+}
+
+:deep(.kw-hl) {
+  color: #ed424b;
+  font-weight: 700;
 }
 
 .r-intro {
   font-size: 12px;
-  color: #bbbbbb;
+  color: var(--color-text-muted);
   overflow: hidden;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.r-arrow {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+  transition: color var(--transition-base), transform var(--transition-base);
+}
+
+.result-card:hover .r-arrow {
+  color: var(--color-accent);
+  transform: translateX(2px);
+}
+
+.source-empty-hint {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  padding: 8px 12px;
+  background: var(--color-surface);
+  border-radius: var(--radius-sm);
+}
+
+/* ─── 空结果 ──────────────────────────────────────────────── */
+.empty-result {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 60px 0;
+  gap: 10px;
+  text-align: center;
+}
+
+.empty-icon {
+  margin-bottom: 4px;
+}
+
+.empty-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+.empty-desc {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+/* ─── 骨架屏 ──────────────────────────────────────────────── */
+.skeleton-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.skeleton-card {
+  display: flex;
+  gap: 14px;
+  background: var(--color-surface);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  border: 1px solid var(--color-border-subtle);
+}
+
+.skeleton-thumb {
+  width: 52px;
+  height: 70px;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  background: linear-gradient(90deg, var(--color-bg-subtle) 25%, var(--color-bg) 50%, var(--color-bg-subtle) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+.skeleton-lines {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+}
+
+.sk-line {
+  height: 12px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--color-bg-subtle) 25%, var(--color-bg) 50%, var(--color-bg-subtle) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+.sk-short { width: 60%; height: 10px; }
+.sk-shorter { width: 80%; height: 9px; }
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }
 </style>

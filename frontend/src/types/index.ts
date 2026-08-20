@@ -1,5 +1,6 @@
 export interface Book {
-  id: number
+  id?: number
+  uuid?: string
   name: string
   author?: string
   cover?: string
@@ -7,9 +8,14 @@ export interface Book {
   source_type?: string
   sourceType?: string
   source_url?: string
+  sourceUrl?: string
+  bookUrl?: string
   source_id?: number
+  sourceId?: number
   local_path?: string
   book_group?: string
+  in_bookcase?: number
+  inBookcase?: number | boolean
   last_read_time?: number
   create_time?: number
   has_update?: number
@@ -50,4 +56,12 @@ export interface SourceSearchRes {
   sourceName: string
   books: Book[]
   error?: string
+}
+
+export interface ReadProgress {
+  bookId: number
+  chapterId: number
+  chapterIndex: number
+  pos?: number
+  updateTime?: number
 }

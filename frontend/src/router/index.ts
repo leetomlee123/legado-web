@@ -40,6 +40,12 @@ const router = createRouter({
       ],
     },
     {
+      path: '/book-detail',
+      name: 'book-detail',
+      component: () => import('@/views/BookDetailView.vue'),
+      meta: { title: '书籍详情' },
+    },
+    {
       path: '/read/:book/:chapter?',
       name: 'read',
       component: () => import('@/views/ReadView.vue'),

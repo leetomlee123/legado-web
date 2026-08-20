@@ -8,10 +8,17 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_file, send_from_directory
+# 确保 Windows 命令行支持 UTF-8 输出
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 
 from book import import_txt_file
 from db import data_dir, open_db, require_db, upload_dir
@@ -32,8 +39,8 @@ from source import (
 MAX_UPLOAD = 200 * 1024 * 1024
 UNSAFE_NAME = re.compile(r"[^\w.\-]", re.UNICODE)
 BOOK_COLS = (
-    "id, name, author, cover, intro, source_type, source_url, source_id, "
-    "local_path, book_group, last_read_time, create_time, has_update"
+    "id, uuid, name, author, cover, intro, source_type, source_url, source_id, "
+    "local_path, book_group, in_bookcase, last_read_time, create_time, has_update"
 )
 
 app = Flask(__name__)
@@ -48,12 +55,22 @@ def book_json(row) -> dict:
     b = dict(row)
     b["hasUpdate"] = b.get("has_update") or 0
     b["sourceType"] = b.get("source_type") or ""
+    b["inBookcase"] = 1 if (b.get("in_bookcase") is None or b.get("in_bookcase") == 1) else 0
+    b["uuid"] = b.get("uuid") or ""
     return b
 
 
-def get_book_by_id(book_id: int):
+def get_book_by_id_or_uuid(identifier: str | int):
     conn = require_db()
-    return conn.execute(f"SELECT {BOOK_COLS} FROM book WHERE id=?", (book_id,)).fetchone()
+    s = str(identifier).strip()
+    if s.isdigit():
+        row = conn.execute(f"SELECT {BOOK_COLS} FROM book WHERE id=? OR uuid=?", (int(s), s)).fetchone()
+    else:
+        row = conn.execute(f"SELECT {BOOK_COLS} FROM book WHERE uuid=?", (s,)).fetchone()
+    return row
+
+
+get_book_by_id = get_book_by_id_or_uuid
 
 
 def query_int(key: str, default: int) -> int:
@@ -115,7 +132,7 @@ def list_books():
     page = query_int("page", 0)
     size = query_int("size", 20) or 20
 
-    where = "WHERE 1=1"
+    where = "WHERE (in_bookcase IS NULL OR in_bookcase = 1)"
     args: list = []
     if keyword:
         where += " AND (name LIKE ? OR author LIKE ?)"
@@ -135,40 +152,81 @@ def list_books():
     return jsonify({"items": [book_json(r) for r in rows], "total": total})
 
 
-@app.get("/api/books/<int:book_id>")
-def get_book(book_id: int):
-    b = get_book_by_id(book_id)
+@app.post("/api/books/batch-delete")
+def batch_delete_books():
+    body = request.get_json(silent=True) or {}
+    identifiers = body.get("identifiers") or body.get("ids") or []
+    if not identifiers:
+        return jsonify({"ok": True, "count": 0})
+
+    conn = require_db()
+    deleted = 0
+    for ident in identifiers:
+        b = get_book_by_id(ident)
+        if b is not None:
+            if b["local_path"]:
+                try:
+                    os.remove(b["local_path"])
+                except OSError:
+                    pass
+            conn.execute("DELETE FROM book WHERE id=?", (b["id"],))
+            deleted += 1
+    conn.commit()
+    return jsonify({"ok": True, "count": deleted})
+
+
+@app.get("/api/books/<identifier>")
+def get_book(identifier: str):
+    b = get_book_by_id(identifier)
     if b is None:
         return write_msg(404, "书籍不存在")
     return jsonify(book_json(b))
 
 
-@app.delete("/api/books/<int:book_id>")
-def delete_book(book_id: int):
-    b = get_book_by_id(book_id)
+@app.delete("/api/books/<identifier>")
+def delete_book(identifier: str):
+    b = get_book_by_id(identifier)
     if b is not None and b["local_path"]:
         try:
             os.remove(b["local_path"])
         except OSError:
             pass
-    conn = require_db()
-    conn.execute("DELETE FROM book WHERE id=?", (book_id,))
-    conn.commit()
+    if b is not None:
+        conn = require_db()
+        conn.execute("DELETE FROM book WHERE id=?", (b["id"],))
+        conn.commit()
     return jsonify({"ok": True})
 
 
-@app.get("/api/books/<int:book_id>/chapters")
-def list_chapters(book_id: int):
-    b = get_book_by_id(book_id)
+@app.post("/api/books/<identifier>/add-to-shelf")
+def add_book_to_shelf(identifier: str):
+    b = get_book_by_id(identifier)
     if b is None:
         return write_msg(404, "书籍不存在")
-    if (b["source_type"] or "") == "web":
+    now = int(time.time() * 1000)
+    conn = require_db()
+    conn.execute("UPDATE book SET in_bookcase=1, create_time=? WHERE id=?", (now, b["id"]))
+    conn.commit()
+    saved = get_book_by_id(b["id"])
+    return jsonify(book_json(saved))
+
+
+@app.get("/api/books/<identifier>/chapters")
+def list_chapters(identifier: str):
+    b = get_book_by_id(identifier)
+    if b is None:
+        return write_msg(404, "书籍不存在")
+    book_id = b["id"]
+    conn = require_db()
+    # 检查是否已有章节
+    existing_count = conn.execute("SELECT COUNT(*) FROM chapter WHERE book_id=?", (book_id,)).fetchone()[0]
+    if existing_count == 0 and (b["source_type"] or "") == "web":
         try:
             refresh_web_chapters(dict(b))
         except Exception as e:
-            # 目录刷新失败时仍返回已有章节，避免阅读页整页空白
             print(f"[chapters] refresh book {book_id} failed: {e}")
-    conn = require_db()
+            return write_msg(502, f"解析章节列表失败：{e}")
+
     rows = conn.execute(
         "SELECT id, book_id, title, idx FROM chapter WHERE book_id=? ORDER BY idx",
         (book_id,),
@@ -177,8 +235,12 @@ def list_chapters(book_id: int):
     return jsonify(out)
 
 
-@app.get("/api/books/<int:book_id>/chapters/<int:cid>/content")
-def get_chapter_content(book_id: int, cid: int):
+@app.get("/api/books/<identifier>/chapters/<int:cid>/content")
+def get_chapter_content(identifier: str, cid: int):
+    b = get_book_by_id(identifier)
+    if b is None:
+        return write_msg(404, "书籍不存在")
+    book_id = b["id"]
     conn = require_db()
     row = conn.execute(
         "SELECT content, content_url FROM chapter WHERE id=? AND book_id=?",
@@ -189,44 +251,123 @@ def get_chapter_content(book_id: int, cid: int):
     content = row["content"] or ""
     content_url = row["content_url"] or ""
     if not content.strip() and content_url:
-        b = get_book_by_id(book_id)
-        if b is not None and (b["source_type"] or "") == "web":
+        if (b["source_type"] or "") == "web":
             try:
                 content = fetch_web_chapter(dict(b), content_url)
             except Exception as e:
-                return write_msg(500, str(e))
+                return write_msg(500, f"解析章节数据失败：{e}")
             conn.execute("UPDATE chapter SET content=? WHERE id=?", (content, cid))
             conn.commit()
     return jsonify({"content": content})
 
 
-def _serve_cover(book_id: int):
-    b = get_book_by_id(book_id)
+@app.get("/api/books/<identifier>/progress")
+def get_read_progress(identifier: str):
+    b = get_book_by_id(identifier)
+    if b is None:
+        return write_msg(404, "书籍不存在")
+    book_id = b["id"]
+    conn = require_db()
+    row = conn.execute(
+        "SELECT chapter_id, chapter_idx, pos, update_time FROM read_progress WHERE book_id=?",
+        (book_id,),
+    ).fetchone()
+    if row is None:
+        return jsonify({"bookId": book_id, "chapterId": 0, "chapterIndex": 0, "pos": 0, "updateTime": 0})
+    return jsonify({
+        "bookId": book_id,
+        "chapterId": row["chapter_id"],
+        "chapterIndex": row["chapter_idx"],
+        "pos": row["pos"],
+        "updateTime": row["update_time"],
+    })
+
+
+@app.post("/api/books/<identifier>/progress")
+def save_read_progress(identifier: str):
+    b = get_book_by_id(identifier)
+    if b is None:
+        return write_msg(404, "书籍不存在")
+    book_id = b["id"]
+    body = request.get_json(silent=True) or {}
+    chapter_id = int(body.get("chapterId") or body.get("chapter_id") or 0)
+    chapter_idx = int(body.get("chapterIndex") or body.get("chapter_idx") or 0)
+    pos = float(body.get("pos") or 0.0)
+    now = int(time.time() * 1000)
+
+    conn = require_db()
+    conn.execute(
+        """
+        INSERT INTO read_progress (book_id, chapter_id, chapter_idx, pos, update_time)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(book_id) DO UPDATE SET
+            chapter_id = excluded.chapter_id,
+            chapter_idx = excluded.chapter_idx,
+            pos = excluded.pos,
+            update_time = excluded.update_time
+        """,
+        (book_id, chapter_id, chapter_idx, pos, now),
+    )
+    # 更新书籍最近阅读时间和历史记录
+    conn.execute("UPDATE book SET last_read_time=? WHERE id=?", (now, book_id))
+    conn.execute(
+        """
+        INSERT INTO history (book_id, read_time)
+        VALUES (?, ?)
+        ON CONFLICT(book_id) DO UPDATE SET read_time = excluded.read_time
+        """,
+        (book_id, now),
+    )
+    conn.commit()
+    return jsonify({"ok": True})
+
+
+def _generate_default_cover_svg(title: str = "书") -> Response:
+    short_title = (title or "书")[:4]
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 220" width="160" height="220">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4a3728"/>
+      <stop offset="100%" stop-color="#2a1f18"/>
+    </linearGradient>
+  </defs>
+  <rect width="160" height="220" rx="6" fill="url(#bg)"/>
+  <line x1="12" y1="0" x2="12" y2="220" stroke="rgba(255,255,255,0.1)" stroke-width="2"/>
+  <rect x="22" y="26" width="116" height="168" rx="3" fill="none" stroke="rgba(184,134,58,0.35)" stroke-width="1.5"/>
+  <text x="80" y="118" fill="#e6d5b8" font-size="18" font-family="'Noto Serif SC', 'Songti SC', serif" font-weight="600" text-anchor="middle">{short_title}</text>
+</svg>"""
+    return Response(svg, mimetype="image/svg+xml")
+
+
+def _serve_cover_by_book(b):
     if b is None or not b["cover"]:
-        return ("", 200)
+        return _generate_default_cover_svg(b["name"] if b else "书")
     cover = b["cover"]
     if cover.startswith("http://") or cover.startswith("https://"):
         return app.redirect(cover, code=302)
     if os.path.isfile(cover):
         return send_file(cover)
-    return ("", 200)
+    return _generate_default_cover_svg(b["name"] if b else "书")
 
 
-@app.get("/api/books/<int:book_id>/cover")
-def get_cover_api(book_id: int):
-    return _serve_cover(book_id)
+@app.get("/api/books/<identifier>/cover")
+def get_cover_api(identifier: str):
+    b = get_book_by_id(identifier)
+    return _serve_cover_by_book(b)
 
 
-@app.get("/books/<int:book_id>/cover")
-def get_cover(book_id: int):
-    return _serve_cover(book_id)
+@app.get("/books/<identifier>/cover")
+def get_cover(identifier: str):
+    b = get_book_by_id(identifier)
+    return _serve_cover_by_book(b)
 
 
-@app.get("/api/books/<int:book_id>/detail")
-def get_book_detail(book_id: int):
-    b = get_book_by_id(book_id)
+@app.get("/api/books/<identifier>/detail")
+def get_book_detail(identifier: str):
+    b = get_book_by_id(identifier)
     if b is None or (b["source_type"] or "") != "web":
         return write_msg(404, "非网络书")
+    book_id = b["id"]
     try:
         detail = crawl_book_detail(dict(b))
     except Exception as e:
@@ -247,12 +388,16 @@ def get_book_detail(book_id: int):
     return jsonify(out)
 
 
+@app.post("/api/books/init-preview")
 @app.post("/api/books/from-search")
 def add_from_search():
-    """把书源搜索结果加入书架，返回真实 book.id，供阅读页使用。"""
+    """将搜索结果注册到数据库。支持预生成的 UUID 和 in_bookcase（默认0不入书架，或1入书架）。"""
     body = request.get_json(silent=True) or {}
     name = (body.get("name") or "").strip()
     book_url = (body.get("bookUrl") or body.get("source_url") or body.get("sourceUrl") or "").strip()
+    uuid_val = (body.get("uuid") or "").strip()
+    in_bookcase = 1 if body.get("inBookcase") is True or body.get("in_bookcase") == 1 else 0
+
     try:
         source_id = int(body.get("sourceId") or body.get("source_id") or 0)
     except (TypeError, ValueError):
@@ -261,35 +406,117 @@ def add_from_search():
         return write_msg(400, "缺少书名或书籍地址")
     if not source_id:
         return write_msg(400, "缺少书源")
+
     conn = require_db()
-    existing = conn.execute(
-        "SELECT id FROM book WHERE source_url=? AND source_id=?",
-        (book_url, source_id),
-    ).fetchone()
+    # 优先根据 uuid 查找
+    existing = None
+    if uuid_val:
+        existing = conn.execute("SELECT id FROM book WHERE uuid=?", (uuid_val,)).fetchone()
+    if not existing:
+        existing = conn.execute(
+            "SELECT id, uuid FROM book WHERE source_url=? AND source_id=?",
+            (book_url, source_id),
+        ).fetchone()
+
     if existing:
-        return jsonify(book_json(get_book_by_id(int(existing["id"]))))
+        book_id = int(existing["id"])
+        # 如果已有记录但未设置 uuid，补充 uuid
+        if uuid_val and not (existing["uuid"] if "uuid" in existing.keys() else ""):
+            conn.execute("UPDATE book SET uuid=? WHERE id=?", (uuid_val, book_id))
+            conn.commit()
+        if in_bookcase == 1:
+            conn.execute("UPDATE book SET in_bookcase=1 WHERE id=?", (book_id,))
+            conn.commit()
+        return jsonify(book_json(get_book_by_id(book_id)))
+
     now = int(time.time() * 1000)
     cur = conn.execute(
-        "INSERT INTO book (name, author, cover, intro, source_type, source_url, source_id, create_time) "
-        "VALUES (?, ?, ?, ?, 'web', ?, ?, ?)",
+        "INSERT INTO book (uuid, name, author, cover, intro, source_type, source_url, source_id, in_bookcase, create_time) "
+        "VALUES (?, ?, ?, ?, ?, 'web', ?, ?, ?, ?)",
         (
+            uuid_val,
             name,
             body.get("author") or "",
             body.get("cover") or "",
             body.get("intro") or "",
             book_url,
             source_id,
+            in_bookcase,
             now,
         ),
     )
     conn.commit()
     saved = get_book_by_id(int(cur.lastrowid))
     if saved is None:
-        return write_msg(500, "加入书架失败")
+        return write_msg(500, "初始化书籍失败")
     return jsonify(book_json(saved))
 
 
+# ---------- preview（免入库实时预览）----------
+
+
+@app.post("/api/preview/toc")
+def preview_toc():
+    """根据 bookUrl + sourceId 实时抓取目录，不写入数据库。"""
+    body = request.get_json(silent=True) or {}
+    try:
+        source_id = int(body.get("sourceId") or body.get("source_id") or 0)
+    except (TypeError, ValueError):
+        source_id = 0
+    book_url = (body.get("bookUrl") or body.get("source_url") or "").strip()
+    if not source_id or not book_url:
+        return write_msg(400, "缺少 sourceId 或 bookUrl")
+
+    from source import source_by_id, _rule_for_source, _toc_url, crawl_toc, fetch_url
+
+    src = source_by_id(source_id)
+    if not src:
+        return write_msg(404, "书源不存在")
+    try:
+        rule = _rule_for_source(src)
+    except ValueError as e:
+        return write_msg(400, str(e))
+    if rule.toc is None or not rule.toc.selector:
+        return write_msg(400, "该书源无目录规则")
+
+    fake_book = {"source_id": source_id, "source_url": book_url, "id": 0}
+    toc_url = _toc_url(fake_book, rule)
+    if not toc_url:
+        return write_msg(400, "无法确定目录地址")
+    try:
+        html = fetch_url(toc_url)
+    except Exception as e:
+        return write_msg(502, f"目录抓取失败：{e}")
+    chapters = crawl_toc(html, rule.toc, toc_url)
+    return jsonify(
+        [{"index": i, "title": c["title"], "chapterUrl": c["chapterUrl"]} for i, c in enumerate(chapters)]
+    )
+
+
+@app.post("/api/preview/content")
+def preview_content():
+    """根据 chapterUrl + sourceId 实时抓取章节正文，不写入数据库。"""
+    body = request.get_json(silent=True) or {}
+    try:
+        source_id = int(body.get("sourceId") or body.get("source_id") or 0)
+    except (TypeError, ValueError):
+        source_id = 0
+    chapter_url = (body.get("chapterUrl") or "").strip()
+    if not source_id or not chapter_url:
+        return write_msg(400, "缺少 sourceId 或 chapterUrl")
+
+    from source import source_by_id, _rule_for_source, fetch_web_chapter
+
+    fake_book = {"source_id": source_id, "source_url": "", "id": 0}
+    try:
+        content = fetch_web_chapter(fake_book, chapter_url)
+    except Exception as e:
+        return write_msg(502, f"章节抓取失败：{e}")
+    return jsonify({"content": content})
+
+
 @app.post("/api/books/import/txt")
+
 def import_txt():
     try:
         path, orig = save_upload()
@@ -330,9 +557,42 @@ def import_pdf():
 
 @app.get("/api/sources")
 def list_sources():
+    page_str = request.args.get("page")
+    size_str = request.args.get("size")
+    keyword = (request.args.get("keyword") or "").strip()
+    enabled_str = request.args.get("enabled")
+
     conn = require_db()
+
+    # 如果传了 page/size 则返回分页结构，否则返回全量数组保证兼容性
+    if page_str is not None and size_str is not None:
+        try:
+            page = max(0, int(page_str))
+            size = max(1, min(500, int(size_str)))
+        except ValueError:
+            page, size = 0, 20
+
+        where = []
+        args = []
+        if keyword:
+            where.append("(name LIKE ? OR url LIKE ?)")
+            args.extend([f"%{keyword}%", f"%{keyword}%"])
+        if enabled_str in ("1", "0", "true", "false"):
+            en_val = 1 if enabled_str in ("1", "true") else 0
+            where.append("enabled = ?")
+            args.append(en_val)
+
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        total = conn.execute(f"SELECT COUNT(*) as c FROM book_source {where_sql}", args).fetchone()["c"]
+        rows = conn.execute(
+            f"SELECT id, name, url, enabled, rule, create_time FROM book_source {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?",
+            [*args, size, page * size],
+        ).fetchall()
+        return jsonify({"items": [dict(r) for r in rows], "total": total})
+
+    # 全量查询
     rows = conn.execute(
-        "SELECT id, name, url, enabled, rule, create_time FROM book_source ORDER BY id"
+        "SELECT id, name, rule, url, enabled, create_time FROM book_source ORDER BY id DESC"
     ).fetchall()
     return jsonify([dict(r) for r in rows])
 
@@ -364,6 +624,43 @@ def create_source():
     )
 
 
+@app.post("/api/sources/batch-delete")
+def batch_delete_sources():
+    body = request.get_json(silent=True) or {}
+    raw_ids = body.get("ids") or []
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return write_msg(400, "缺少要删除的书源 ID 列表")
+
+    ids = [int(x) for x in raw_ids if str(x).isdigit()]
+    if not ids:
+        return write_msg(400, "书源 ID 列表格式错误")
+
+    conn = require_db()
+    placeholders = ",".join("?" for _ in ids)
+    conn.execute(f"DELETE FROM book_source WHERE id IN ({placeholders})", ids)
+    conn.commit()
+    return jsonify({"ok": True, "deletedCount": len(ids)})
+
+
+@app.post("/api/sources/batch-toggle")
+def batch_toggle_sources():
+    body = request.get_json(silent=True) or {}
+    raw_ids = body.get("ids") or []
+    enabled = 1 if body.get("enabled") in (True, 1, "1") else 0
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return write_msg(400, "缺少书源 ID 列表")
+
+    ids = [int(x) for x in raw_ids if str(x).isdigit()]
+    if not ids:
+        return write_msg(400, "书源 ID 列表格式错误")
+
+    conn = require_db()
+    placeholders = ",".join("?" for _ in ids)
+    conn.execute(f"UPDATE book_source SET enabled=? WHERE id IN ({placeholders})", [enabled, *ids])
+    conn.commit()
+    return jsonify({"ok": True, "updatedCount": len(ids), "enabled": enabled})
+
+
 @app.put("/api/sources/<int:sid>")
 def update_source(sid: int):
     body = request.get_json(silent=True) or {}
@@ -386,40 +683,112 @@ def delete_source(sid: int):
     return jsonify({"ok": True})
 
 
+def _process_and_import_payload(text: str, default_name: str = "") -> dict:
+    from source import parse_sources_from_payload, legado_rule_upsert
+    sources = parse_sources_from_payload(text, default_name)
+    if not sources:
+        return {"success": False, "count": 0, "inserted": 0, "updated": 0, "message": "未解析到有效书源规则"}
+
+    inserted_count = 0
+    updated_count = 0
+    first_id = 0
+    sample_names = []
+
+    for name, source_url, rule_str in sources:
+        try:
+            sid, is_new = legado_rule_upsert(name, source_url, rule_str)
+            if first_id == 0:
+                first_id = sid
+            if is_new:
+                inserted_count += 1
+            else:
+                updated_count += 1
+            if len(sample_names) < 5:
+                sample_names.append(name)
+        except Exception as e:
+            print(f"[import] upsert error for {name}: {e}")
+            continue
+
+    total = inserted_count + updated_count
+    if total == 0:
+        return {"success": False, "count": 0, "message": "书源入库失败，请检查规则格式"}
+
+    return {
+        "success": True,
+        "count": total,
+        "inserted": inserted_count,
+        "updated": updated_count,
+        "firstId": first_id,
+        "sample": sample_names,
+        "message": f"成功导入 {total} 个书源（新增 {inserted_count} 个，更新 {updated_count} 个）",
+    }
+
+
 @app.post("/api/sources/import")
+@app.post("/api/sources/import/url")
 def import_source_url():
+    """多种形式导入：支持网络 URL 订阅、合集页面解析、或者直接传 text。"""
     body = request.get_json(silent=True) or {}
     url = (body.get("url") or "").strip()
+    text = (body.get("text") or "").strip()
+    name = (body.get("name") or "").strip()
+
+    if text:
+        res = _process_and_import_payload(text, name or "文本导入")
+        return jsonify(res)
+
     if not url:
-        return write_msg(400, "缺少订阅URL")
+        return write_msg(400, "缺少订阅 URL 或内容")
+
     try:
-        text = fetch_url(url)
+        fetched = fetch_url(url)
     except Exception as e:
-        return jsonify({"failed": 1, "message": str(e)}), 500
+        return jsonify({"success": False, "failed": 1, "message": f"网络请求失败：{e}"}), 500
+
+    res = _process_and_import_payload(fetched, name or url)
+    res["url"] = url
+    return jsonify(res)
+
+
+@app.post("/api/sources/import/file")
+def import_source_file():
+    """本地书源文件导入（支持 .json 或 .txt 批量书源文件）。"""
     try:
-        json.loads(text)
-    except json.JSONDecodeError:
-        return jsonify({"failed": 1, "message": "订阅内容不是合法 JSON"}), 500
-    name = (body.get("name") or "").strip() or "订阅导入"
-    inserted = 0
-    first_id = 0
-    for nm, rule in split_legado_rules(name, text):
-        try:
-            rid = legado_rule_insert(nm, rule)
-        except Exception:
-            continue
-        if first_id == 0:
-            first_id = rid
-        inserted += 1
-    if first_id == 0:
-        return jsonify({"failed": 1, "message": "订阅中无有效书源"}), 500
+        path, orig_name = save_upload()
+    except Exception:
+        return write_msg(400, "未上传文件")
+
     try:
-        rule_obj = json.loads(text)
-    except json.JSONDecodeError:
-        rule_obj = text
-    return jsonify(
-        {"id": first_id, "count": inserted, "name": name, "url": url, "rule": rule_obj, "enabled": 1}
-    )
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except Exception as e:
+        return jsonify({"success": False, "message": f"文件读取失败：{e}"}), 500
+
+    res = _process_and_import_payload(content, orig_name)
+    return jsonify(res)
+
+
+@app.get("/api/sources/presets")
+def get_source_presets():
+    """内置推荐优质书源订阅源合集。"""
+    presets = [
+        {
+            "name": "一程书源合集 (yckceo 精品源)",
+            "url": "https://www.yckceo.com/yuedu/rss/index.html",
+            "desc": "汇聚全网数百个优质小说源，实时维护更新",
+        },
+        {
+            "name": "源仓库优质订阅源",
+            "url": "https://raw.githubusercontent.com/gedoor/legado/master/README.md",
+            "desc": "包含热门精选、全网出版物与网络文学书源",
+        },
+        {
+            "name": "半山人小说精选源",
+            "url": "https://www.banshanren.com",
+            "desc": "热门玄幻、都市小说极速书源",
+        },
+    ]
+    return jsonify(presets)
 
 
 @app.get("/api/settings")
@@ -435,54 +804,148 @@ def update_settings():
     return jsonify({"ok": True, "proxy": get_proxy()})
 
 
-@app.get("/api/search/all")
-def search_all():
+def _execute_single_source_search(sid: int, name: str, rule_str: str, keyword: str) -> dict:
+    from source import fetch_search_response
+    rule = parse_legado_rule(rule_str)
+    if rule is None or rule.search is None or not rule.search.url:
+        return {"sourceId": sid, "sourceName": name, "books": [], "error": "无搜索规则"}
+
+    search_spec = rule.search.url
+    try:
+        html, final_url = fetch_search_response(search_spec, keyword)
+    except Exception as e:
+        return {"sourceId": sid, "sourceName": name, "books": [], "error": str(e)}
+
+    try:
+        books = crawl_search(html, rule.search, final_url)
+    except Exception as e:
+        print(f"[_execute_single_source_search] crawl_search error for {name}: {e}")
+        return {"sourceId": sid, "sourceName": name, "books": [], "error": str(e)}
+
+    print(f"[_execute_single_source_search] sid={sid} name={name} html_len={len(html)} books_found={len(books)}")
+    for b in books:
+        b["sourceId"] = sid
+        b["sourceType"] = "web"
+    return {"sourceId": sid, "sourceName": name, "books": books, "error": None}
+
+
+@app.get("/api/search/stream")
+def search_stream():
+    """SSE 流式搜索：每搜完一个书源立即向前端推送一条事件数据。"""
+    import queue
+    from concurrent.futures import ThreadPoolExecutor
+
     keyword = (request.args.get("keyword") or "").strip()
     if not keyword:
         return write_msg(400, "缺少关键字")
+    source_ids_str = (request.args.get("sourceIds") or "").strip()
+
     conn = require_db()
-    rows = conn.execute("SELECT id, name, rule FROM book_source WHERE enabled=1").fetchall()
-    from urllib.parse import quote
+    if source_ids_str:
+        sids = [int(x) for x in source_ids_str.split(",") if x.strip().isdigit()]
+        if sids:
+            placeholders = ",".join("?" for _ in sids)
+            rows = conn.execute(
+                f"SELECT id, name, rule FROM book_source WHERE enabled=1 AND id IN ({placeholders})",
+                sids,
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT id, name, rule FROM book_source WHERE enabled=1").fetchall()
+    else:
+        rows = conn.execute("SELECT id, name, rule FROM book_source WHERE enabled=1").fetchall()
+
+    def generate():
+        total_sources = len(rows)
+        yield f"data: {json.dumps({'type': 'start', 'totalSources': total_sources}, ensure_ascii=False)}\n\n"
+
+        if total_sources == 0:
+            yield f"data: {json.dumps({'type': 'done', 'totalBooks': 0}, ensure_ascii=False)}\n\n"
+            return
+
+        q = queue.Queue()
+
+        def worker(row):
+            res = _execute_single_source_search(row["id"], row["name"], row["rule"] or "", keyword)
+            q.put(res)
+
+        executor = ThreadPoolExecutor(max_workers=min(12, total_sources))
+        for r in rows:
+            executor.submit(worker, r)
+        executor.shutdown(wait=False)
+
+        completed = 0
+        total_books = 0
+        while completed < total_sources:
+            try:
+                res = q.get(timeout=15.0)
+                completed += 1
+                total_books += len(res.get("books", []))
+                payload = {
+                    "type": "source_result",
+                    "completed": completed,
+                    "totalSources": total_sources,
+                    **res,
+                }
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            except queue.Empty:
+                break
+
+        yield f"data: {json.dumps({'type': 'done', 'totalBooks': total_books}, ensure_ascii=False)}\n\n"
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.get("/api/search/all")
+def search_all():
+    """标准并发搜索：多线程并发检索后统一返回。"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    keyword = (request.args.get("keyword") or "").strip()
+    if not keyword:
+        return write_msg(400, "缺少关键字")
+    source_ids_str = (request.args.get("sourceIds") or "").strip()
+
+    conn = require_db()
+    if source_ids_str:
+        sids = [int(x) for x in source_ids_str.split(",") if x.strip().isdigit()]
+        if sids:
+            placeholders = ",".join("?" for _ in sids)
+            rows = conn.execute(
+                f"SELECT id, name, rule FROM book_source WHERE enabled=1 AND id IN ({placeholders})",
+                sids,
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT id, name, rule FROM book_source WHERE enabled=1").fetchall()
+    else:
+        rows = conn.execute("SELECT id, name, rule FROM book_source WHERE enabled=1").fetchall()
 
     results = []
-    for row in rows:
-        sid, name, rule_str = row["id"], row["name"], row["rule"] or ""
-        rule = parse_legado_rule(rule_str)
-        if rule is None or rule.search is None:
-            print(f"[search] source {sid} {name}: 无搜索规则")
-            results.append(
-                {"sourceId": sid, "sourceName": name, "books": [], "error": "无搜索规则"}
-            )
-            continue
-        esc = quote(keyword)
-        search_url = rule.search.url
-        search_url = (
-            search_url.replace("{{key}}", esc)
-            .replace("{{search}}", esc)
-            .replace("{search}", esc)
-        )
-        try:
-            html = fetch_url(search_url)
-        except Exception as e:
-            print(f"[search] source {sid} fetch err: {e} url={search_url}")
-            results.append(
-                {"sourceId": sid, "sourceName": name, "books": [], "error": str(e)}
-            )
-            continue
-        print(f"[search] source {sid} url={search_url!r} len={len(html)} selector={rule.search.selector!r}")
-        try:
-            books = crawl_search(html, rule.search, search_url)
-        except Exception as e:
-            print(f"[search] source {sid} parse err: {e}")
-            results.append(
-                {"sourceId": sid, "sourceName": name, "books": [], "error": str(e)}
-            )
-            continue
-        print(f"[search] source {sid} got {len(books)} books")
-        for b in books:
-            b["sourceId"] = sid
-            b["sourceType"] = "web"
-        results.append({"sourceId": sid, "sourceName": name, "books": books})
+    if rows:
+        with ThreadPoolExecutor(max_workers=min(12, len(rows))) as executor:
+            futures = [
+                executor.submit(
+                    _execute_single_source_search,
+                    r["id"],
+                    r["name"],
+                    r["rule"] or "",
+                    keyword,
+                )
+                for r in rows
+            ]
+            for f in as_completed(futures):
+                try:
+                    results.append(f.result())
+                except Exception:
+                    pass
+
     return jsonify(results)
 
 
@@ -515,7 +978,7 @@ def main():
     open_db()
     mount_frontend()
     port = os.environ.get("PORT") or "8081"
-    print(f"📚 Legado Web 后端已启动: http://localhost:{port}")
+    print(f"[Legado Web] 后端已启动: http://localhost:{port}")
     app.run(host="0.0.0.0", port=int(port), threaded=True)
 
 
