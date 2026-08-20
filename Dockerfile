@@ -18,7 +18,7 @@ FROM python:3.11-slim AS runner
 # 设置时区与环境变量
 ENV TZ=Asia/Shanghai \
     PYTHONUNBUFFERED=1 \
-    PORT=8081 \
+    PORT=4388 \
     LEGADO_DATA=/app/data
 
 WORKDIR /app
@@ -45,7 +45,7 @@ COPY --from=frontend-builder /app/frontend/dist /app/dist
 VOLUME ["/app/data", "/app/logs"]
 
 # 暴露端口
-EXPOSE 8081
+EXPOSE 4388
 
 # 启动服务
 CMD ["python", "main.py"]

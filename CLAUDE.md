@@ -43,12 +43,12 @@
 ```bash
 ./start.sh
 ```
-- 同时启动前端开发服务器（http://localhost:5173）和后端（http://localhost:8081）
-- 后端默认端口为 8081，可通过 `PORT=8081 ./start.sh` 修改
+- 同时启动前端开发服务器（http://localhost:5173）和后端（http://localhost:4388）
+- 后端默认端口为 4388，可通过 `PORT=4388 ./start.sh` 修改
 
 ### 构建与开发
 - **前端**：`cd frontend && npm run dev` （Vite 开发服务器）
-- **后端**：`cd backend/golang && go run .` （默认 :8081）
+- **后端**：`cd backend/golang && go run .` （默认 :4388）
 - **旧 Node 后端**：`cd backend && node server.js`
 - **生产构建**：`cd frontend && npm run build` （输出到 `dist/`）
 

@@ -2,7 +2,7 @@
 # 启动 Legado Web（Vue 前端 + Python 后端）
 set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-PORT="${PORT:-8081}"
+PORT="${PORT:-4388}"
 
 echo "📦 安装前端依赖..."
 (cd "$ROOT/frontend" && npm install)

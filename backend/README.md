@@ -33,12 +33,12 @@ filetype>=1.2.0
 ## 推荐使用
 ```bash
 # 替代 Go 后端
-PORT=8081 python main.py
+PORT=4388 python main.py
 ```
 
 ## 替代方案 (更推荐)
 ```bash
 # 使用 FastAPI + Uvicorn (更现代)
 pip install "uvicorn[standard]" fastapi
-uvicorn main:app --host 0.0.0.0 --port 8081
+uvicorn main:app --host 0.0.0.0 --port 4388
 ```

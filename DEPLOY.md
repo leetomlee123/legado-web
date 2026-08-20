@@ -29,7 +29,7 @@ docker compose up -d --build
 ```
 
 启动完成后，打开浏览器访问：
-👉 **http://localhost:8081** 即可开始使用！
+👉 **http://localhost:4388** 即可开始使用！
 
 ---
 
@@ -104,7 +104,7 @@ server {
     client_max_body_size 200M;
 
     location / {
-        proxy_pass http://127.0.0.1:8081;
+        proxy_pass http://127.0.0.1:4388;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -129,7 +129,7 @@ server {
 
 ```caddyfile
 reader.yourdomain.com {
-    reverse_proxy 127.0.0.1:8081 {
+    reverse_proxy 127.0.0.1:4388 {
         transport http {
             read_timeout 600s
         }
@@ -149,4 +149,4 @@ reader.yourdomain.com {
 - 在 **书源管理** 页面点击 **「⚡ 批量测速」**，将显示超时的书源一键禁用或删除。
 
 ### 3. 如何修改访问端口？
-- 修改 `docker-compose.yaml` 中的 `ports`，例如将 `"8081:8081"` 改为 `"9090:8081"`，然后执行 `docker compose up -d` 即可。
+- 修改 `docker-compose.yaml` 中的 `ports`，例如将 `"4388:4388"` 改为 `"9090:4388"`，然后执行 `docker compose up -d` 即可。

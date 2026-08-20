@@ -1233,7 +1233,7 @@ def main():
     open_db()
     health_manager.start()
     mount_frontend()
-    port = os.environ.get("PORT") or "8081"
+    port = os.environ.get("PORT") or "4388"
     print(f"[Legado Web] 后端已启动: http://localhost:{port}")
     app.run(host="0.0.0.0", port=int(port), threaded=True)
 

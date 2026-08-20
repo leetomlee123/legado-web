@@ -31,9 +31,9 @@ python main.py
 ```
 
 - 前端：http://localhost:5173 （Vite 代理 `/api` → 后端）
-- 后端 API：http://localhost:8081
+- 后端 API：http://localhost:4388
 
-> 注：默认后端端口 **8081**。如被占用可通过 `PORT=8081 ./start.sh` 修改。
+> 注：默认后端端口 **4388**。如被占用可通过 `PORT=4388 ./start.sh` 修改。
 
 ## 🏗️ 技术栈
 
@@ -120,7 +120,7 @@ legado-web/
 
 - **端口被占用**：
   ```bash
-  PORT=8081 ./start.sh
+  PORT=4388 ./start.sh
   ```
 
 - **后端启动失败**（`main.py` 错误）：
