@@ -273,7 +273,7 @@
       <div class="field-group-inline">
         <div>
           <div class="field-label">启用移动端转桌面端 (m. → www.)</div>
-          <span class="field-hint">开启后，全网搜索、目录抓取、正文解析及外链打开时将自动重写 <code>m.</code> 网址为 <code>www.</code>，获取更完整通畅的电脑端小说正文排版。</span>
+          <span class="field-hint">开启后，全网搜索、目录抓取及正文解析时将优先请求 <code>www.</code> 桌面端网址；若桌面端不存在或访问失败（如 404、域名不可达），系统将<strong>自动无缝回退</strong>至原始移动端地址，保障阅读稳定可用。</span>
         </div>
         <el-switch v-model="mToWww" />
       </div>

@@ -61,6 +61,18 @@ def convert_m_to_www(url: str) -> str:
     return url
 
 
+def convert_www_to_m(url: str) -> str:
+    """将网址中的桌面端域名前缀 www. 转换为 m."""
+    if not url or not isinstance(url, str):
+        return url
+    new_url = re.sub(r"^(https?://|//)www\.", r"\1m.", url, flags=re.IGNORECASE)
+    if new_url != url:
+        return new_url
+    if re.match(r"^www\.[a-zA-Z0-9-]+\.[a-zA-Z]+", url, flags=re.IGNORECASE):
+        return re.sub(r"^www\.", r"m.", url, flags=re.IGNORECASE)
+    return url
+
+
 def normalize_source_url(url: str) -> str:
     """根据系统设置对源 URL 进行规范化处理（若开启 m_to_www 则自动转为 www.）。"""
     if not url or not isinstance(url, str):

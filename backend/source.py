@@ -16,7 +16,13 @@ from bs4 import BeautifulSoup, Tag
 from curl_cffi import requests as cffi_requests
 
 from db import require_db
-from settings import get_proxy, normalize_source_url
+from settings import (
+    get_proxy,
+    normalize_source_url,
+    get_m_to_www,
+    convert_m_to_www,
+    convert_www_to_m,
+)
 from logger import get_logger
 
 logger = get_logger("source")
@@ -45,41 +51,93 @@ def fetch_url(url: str, timeout: float = 20, base_url: str = "", context: str = 
     t0 = time.perf_counter()
     url = (url or "").strip()
     if base_url:
-        base_url = normalize_source_url(base_url.strip())
         if not (url.startswith("http://") or url.startswith("https://")):
             url = urljoin(base_url, url)
-    url = normalize_source_url(url)
     if not (url.startswith("http://") or url.startswith("https://")):
         raise ValueError(f"无效的请求地址: {url}")
 
+    # 构建主选与回退候选地址列表
+    candidates = [url]
+    if get_m_to_www():
+        converted_www = convert_m_to_www(url)
+        if converted_www != url:
+            # 原始为 m. 网址，首选 www. 桌面端，保底回退原始 m. 移动端
+            candidates = [converted_www, url]
+        else:
+            converted_m = convert_www_to_m(url)
+            if converted_m != url:
+                # 原始已是 www. 网址，首选 www.，保底回退 m.
+                candidates = [url, converted_m]
+
     ctx_label = f"[{context}] " if context else ""
-    logger.info("%s发起 GET 网络请求: %s (超时: %ds)", ctx_label, url, int(timeout))
-    try:
-        resp = cffi_requests.get(
-            url,
-            impersonate="chrome120",
-            timeout=timeout,
-            headers={"User-Agent": UA},
-            allow_redirects=True,
-            proxy=get_proxy() or None,
-            verify=False,
-        )
-        resp.raise_for_status()
-        html = decode_http_response(resp)
-        elapsed_ms = int((time.perf_counter() - t0) * 1000)
-        logger.info(
-            "%sGET 请求成功: 状态码 %d, 耗时 %dms, 响应大小 %d 字节, 最终URL: %s",
-            ctx_label,
-            resp.status_code,
-            elapsed_ms,
-            len(resp.content or b""),
-            str(resp.url or url),
-        )
-        return html
-    except Exception as e:
-        elapsed_ms = int((time.perf_counter() - t0) * 1000)
-        logger.warning("%sGET 请求失败: %s (耗时 %dms, URL: %s)", ctx_label, e, elapsed_ms, url)
-        raise
+    last_err = None
+
+    for idx, cand_url in enumerate(candidates):
+        is_fallback = idx > 0
+        if is_fallback:
+            logger.warning(
+                "%s[域名回退] 尝试 www. 域名失败，自动回退至移动端 (m.) 发起请求 -> %s",
+                ctx_label,
+                cand_url,
+            )
+        else:
+            logger.info("%s发起 GET 网络请求: %s (超时: %ds)", ctx_label, cand_url, int(timeout))
+
+        try:
+            resp = cffi_requests.get(
+                cand_url,
+                impersonate="chrome120",
+                timeout=timeout,
+                headers={"User-Agent": UA},
+                allow_redirects=True,
+                proxy=get_proxy() or None,
+                verify=False,
+            )
+            resp.raise_for_status()
+            html = decode_http_response(resp)
+
+            # 404 / 页面不存在防错检测（部分站点 404 仍返回 HTTP 200 短 HTML）
+            if (
+                len(candidates) > 1
+                and idx == 0
+                and len(html) < 2000
+                and any(err_kw in html for err_kw in ["404 Not Found", "页面不存在", "404 错误", "找不到页面", "章节不存在"])
+            ):
+                logger.warning(
+                    "%s[域名回退] www. 页面返回 404 错误提示页 (大小 %d 字节)，自动回退至移动端...",
+                    ctx_label,
+                    len(html),
+                )
+                continue
+
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            logger.info(
+                "%sGET 请求成功%s: 状态码 %d, 耗时 %dms, 响应大小 %d 字节, 最终URL: %s",
+                ctx_label,
+                " (域名回退成功)" if is_fallback else "",
+                resp.status_code,
+                elapsed_ms,
+                len(resp.content or b""),
+                str(resp.url or cand_url),
+            )
+            return html
+        except Exception as e:
+            last_err = e
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            logger.warning(
+                "%sGET 请求失败%s: %s (耗时 %dms, URL: %s)",
+                ctx_label,
+                " (www. 域名首选尝试)" if len(candidates) > 1 and idx == 0 else "",
+                e,
+                elapsed_ms,
+                cand_url,
+            )
+            if len(candidates) > 1 and idx == 0:
+                continue
+
+    if last_err:
+        raise last_err
+    raise ValueError(f"请求失败: {url}")
 
 
 def fetch_subscription_url(url: str, timeout: float = 30) -> tuple[str, int]:
@@ -875,62 +933,85 @@ def fetch_search_response(
             timeout,
         )
 
-    t0 = time.perf_counter()
-    try:
-        if method == "POST":
-            resp = cffi_requests.post(
-                target_url,
-                data=post_data,
-                headers=req_headers,
-                impersonate="chrome120",
-                timeout=timeout,
-                proxy=get_proxy() or None,
-                verify=False,
-            )
+    search_candidates = [target_url]
+    if get_m_to_www():
+        conv_www = convert_m_to_www(target_url)
+        if conv_www != target_url:
+            search_candidates = [conv_www, target_url]
         else:
-            resp = cffi_requests.get(
-                target_url,
-                headers=req_headers,
-                impersonate="chrome120",
-                timeout=timeout,
-                proxy=get_proxy() or None,
-                verify=False,
-            )
+            conv_m = convert_www_to_m(target_url)
+            if conv_m != target_url:
+                search_candidates = [target_url, conv_m]
 
-        resp.raise_for_status()
-        content = resp.content or b""
-        elapsed_ms = int((time.perf_counter() - t0) * 1000)
-
+    last_err = None
+    for idx, req_url in enumerate(search_candidates):
+        is_fallback = idx > 0
+        if is_fallback:
+            logger.warning("[搜索网络] [%s] 尝试 www. 搜索域名失败，自动回退至移动端搜索 -> %s", src_label, req_url)
+        t0 = time.perf_counter()
         try:
-            if charset in ("GBK", "GB2312", "GB18030"):
-                html = content.decode(charset.lower(), errors="replace")
+            if method == "POST":
+                resp = cffi_requests.post(
+                    req_url,
+                    data=post_data,
+                    headers=req_headers,
+                    impersonate="chrome120",
+                    timeout=timeout,
+                    proxy=get_proxy() or None,
+                    verify=False,
+                )
             else:
+                resp = cffi_requests.get(
+                    req_url,
+                    headers=req_headers,
+                    impersonate="chrome120",
+                    timeout=timeout,
+                    proxy=get_proxy() or None,
+                    verify=False,
+                )
+
+            resp.raise_for_status()
+            content = resp.content or b""
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+
+            try:
+                if charset in ("GBK", "GB2312", "GB18030"):
+                    html = content.decode(charset.lower(), errors="replace")
+                else:
+                    html = resp.text
+                    if "charset=gbk" in html.lower() or "charset=gb2312" in html.lower():
+                        html = content.decode("gbk", errors="replace")
+            except Exception:
                 html = resp.text
-                if "charset=gbk" in html.lower() or "charset=gb2312" in html.lower():
-                    html = content.decode("gbk", errors="replace")
-        except Exception:
-            html = resp.text
 
-        logger.info(
-            "[搜索网络] [%s] HTTP 响应成功: 状态码 %d, 耗时 %dms, 响应大小 %d 字节, 最终URL: %s",
-            src_label,
-            resp.status_code,
-            elapsed_ms,
-            len(content),
-            str(resp.url or target_url),
-        )
-        return html, str(resp.url or target_url)
+            logger.info(
+                "[搜索网络] [%s] HTTP 响应成功%s: 状态码 %d, 耗时 %dms, 响应大小 %d 字节, 最终URL: %s",
+                src_label,
+                " (域名回退成功)" if is_fallback else "",
+                resp.status_code,
+                elapsed_ms,
+                len(content),
+                str(resp.url or req_url),
+            )
+            return html, str(resp.url or req_url)
 
-    except Exception as e:
-        elapsed_ms = int((time.perf_counter() - t0) * 1000)
-        logger.warning(
-            "[搜索网络] [%s] HTTP 请求失败: %s (耗时 %dms, 目标URL: %s)",
-            src_label,
-            e,
-            elapsed_ms,
-            target_url,
-        )
-        raise
+        except Exception as e:
+            last_err = e
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            logger.warning(
+                "[搜索网络] [%s] HTTP 请求失败%s: %s (耗时 %dms, 目标URL: %s)",
+                src_label,
+                " (www. 域名首选尝试)" if len(search_candidates) > 1 and idx == 0 else "",
+                e,
+                elapsed_ms,
+                req_url,
+            )
+            if len(search_candidates) > 1 and idx == 0:
+                continue
+
+    if last_err:
+        raise last_err
+    raise ValueError(f"搜索请求失败: {target_url}")
 
 
 def normalize_extract_rule(rule: str, default: str) -> str:
