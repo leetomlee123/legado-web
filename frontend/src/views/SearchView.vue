@@ -1203,4 +1203,101 @@ onUnmounted(() => {
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }
 }
+
+/* ─── 移动端响应式适配 (<= 768px) ────────────────────────── */
+@media (max-width: 768px) {
+  .search-hero {
+    padding: 16px 12px 20px;
+  }
+
+  .search-heading {
+    font-size: 18px;
+    margin-bottom: 4px;
+  }
+
+  .search-sub {
+    font-size: 12px;
+    margin-bottom: 14px;
+  }
+
+  .search-bar {
+    max-width: 100%;
+  }
+
+  .search-input {
+    font-size: 14px;
+    padding: 10px 12px 10px 38px;
+  }
+
+  .btn-search {
+    padding: 10px 16px;
+    font-size: 13px;
+  }
+
+  .source-summary-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .summary-left {
+    overflow-x: auto;
+    white-space: nowrap;
+    padding-bottom: 4px;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .progress-panel {
+    padding: 12px 14px;
+  }
+
+  .progress-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .progress-right {
+    width: 100%;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .weighted-results-container,
+  .grouped-results-container {
+    padding: 0 12px 24px;
+  }
+
+  .result-card {
+    padding: 12px 10px;
+    gap: 12px;
+  }
+
+  .thumb {
+    width: 54px;
+    height: 72px;
+  }
+
+  .r-top-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .r-tags {
+    flex-wrap: wrap;
+  }
+
+  .r-meta-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  .r-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
 </style>

@@ -383,4 +383,27 @@ async function addAndRead() {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* ─── 移动端响应式适配 (<= 600px) ────────────────────────── */
+@media (max-width: 600px) {
+  .detail-hero {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    padding: 20px 16px;
+    gap: 16px;
+  }
+
+  .detail-meta {
+    align-items: center;
+  }
+
+  .detail-tags {
+    justify-content: center;
+  }
+
+  .detail-actions {
+    padding: 0 16px 24px;
+  }
+}
 </style>

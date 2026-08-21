@@ -1,5 +1,6 @@
 <template>
   <el-container class="layout">
+    <!-- 桌面端侧边栏 -->
     <el-aside width="220px" class="sidebar" role="navigation" aria-label="主导航">
       <!-- Logo -->
       <div class="logo">
@@ -36,7 +37,7 @@
       </div>
     </el-aside>
 
-    <el-container>
+    <el-container class="main-container">
       <header class="app-header" role="banner">
         <h1 class="header-title">{{ route.meta?.title || '阅读' }}</h1>
         <div class="header-actions">
@@ -56,6 +57,20 @@
       <main class="app-main">
         <router-view />
       </main>
+
+      <!-- 移动端专属底部导航栏 -->
+      <nav class="mobile-bottom-nav" role="navigation" aria-label="移动端主导航">
+        <router-link
+          v-for="item in navItems"
+          :key="'mobile-' + item.path"
+          :to="item.path"
+          class="mobile-nav-item"
+          :class="{ 'is-active': activePath === item.path || (item.path !== '/' && activePath.startsWith(item.path)) }"
+        >
+          <span class="mobile-nav-icon" aria-hidden="true" v-html="item.icon"></span>
+          <span class="mobile-nav-label">{{ item.label }}</span>
+        </router-link>
+      </nav>
     </el-container>
   </el-container>
 </template>
@@ -310,5 +325,106 @@ const navItems = [
   padding: 0;
   overflow: auto;
   flex: 1;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ─── 移动端专属底部导航栏 (默认在桌面端隐藏) ─────────────── */
+.mobile-bottom-nav {
+  display: none;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 56px;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  background: var(--color-surface);
+  border-top: 1px solid var(--color-border-subtle);
+  z-index: 150;
+  box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.05);
+  backdrop-filter: blur(12px);
+  align-items: center;
+  justify-content: space-around;
+}
+
+.mobile-nav-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  height: 100%;
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.01em;
+  transition: color var(--transition-fast), transform var(--transition-fast);
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  position: relative;
+}
+
+.mobile-nav-item:active {
+  transform: scale(0.92);
+}
+
+.mobile-nav-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  opacity: 0.75;
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
+}
+
+.mobile-nav-item.is-active {
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
+.mobile-nav-item.is-active .mobile-nav-icon {
+  opacity: 1;
+  transform: translateY(-1px);
+}
+
+.mobile-nav-item.is-active::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--color-accent);
+}
+
+/* ─── 移动端断点响应式适配 (<= 768px) ────────────────────────── */
+@media (max-width: 768px) {
+  .sidebar {
+    display: none !important;
+  }
+
+  .main-container {
+    min-height: 100vh;
+    width: 100vw;
+  }
+
+  .app-header {
+    height: 52px;
+    padding: 0 16px;
+  }
+
+  .header-title {
+    font-size: 16px;
+  }
+
+  .app-main {
+    padding-bottom: calc(58px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .mobile-bottom-nav {
+    display: flex !important;
+  }
 }
 </style>

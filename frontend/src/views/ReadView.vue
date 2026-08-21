@@ -2423,4 +2423,87 @@ onUnmounted(() => {
 .modal-fade-leave-to {
   opacity: 0;
 }
+
+/* ─── 移动端阅读响应式适配 (<= 768px) ────────────────────────── */
+@media (max-width: 768px) {
+  .qidian-page-container {
+    padding: 0 0 70px;
+  }
+
+  .qidian-read-main {
+    padding: 20px 16px 40px;
+    box-shadow: none;
+    border-radius: 0;
+  }
+
+  .chapter-main-title {
+    font-size: 20px;
+    margin-bottom: 12px;
+  }
+
+  .chapter-meta-bar {
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: 12px;
+    padding-bottom: 14px;
+  }
+
+  .qidian-right-dock {
+    left: 50% !important;
+    right: auto !important;
+    top: auto !important;
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px)) !important;
+    transform: translateX(-50%) !important;
+    flex-direction: row;
+    border-radius: 30px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+    backdrop-filter: blur(16px);
+    z-index: 90;
+    max-width: 95vw;
+  }
+
+  .dock-item {
+    width: 44px;
+    height: 44px;
+    border-bottom: none;
+    border-right: 1px solid rgba(0, 0, 0, 0.06);
+  }
+
+  .dock-item:last-child {
+    border-right: none;
+  }
+
+  .dock-label {
+    display: none;
+  }
+
+  .chapter-bottom-nav {
+    margin-top: 36px;
+    padding-top: 20px;
+    gap: 8px;
+  }
+
+  .btn-qd-page {
+    flex: 1;
+    justify-content: center;
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+
+  .qd-toc-drawer {
+    width: 86vw;
+    max-width: 360px;
+  }
+
+  .qd-source-drawer {
+    width: 90vw;
+    max-width: 380px;
+  }
+
+  .qd-settings-modal {
+    width: 92vw;
+    max-width: 400px;
+    padding: 20px 16px;
+  }
+}
 </style>

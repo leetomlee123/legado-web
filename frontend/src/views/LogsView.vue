@@ -631,4 +631,49 @@ onUnmounted(() => {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
+
+/* ─── 移动端响应式适配 (<= 768px) ────────────────────────── */
+@media (max-width: 768px) {
+  .logs-page {
+    padding: 12px 10px 24px;
+    height: 100%;
+  }
+
+  .logs-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    padding: 10px 12px;
+  }
+
+  .header-left {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .header-right {
+    overflow-x: auto;
+    white-space: nowrap;
+    padding-bottom: 4px;
+    -webkit-overflow-scrolling: touch;
+    width: 100%;
+  }
+
+  .filter-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+
+  .filter-left, .filter-right {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .search-input {
+    width: 100% !important;
+  }
+}
 </style>

@@ -312,4 +312,24 @@ async function onFileChange(file: UploadFile) {
   color: var(--color-accent);
   background: var(--color-accent-pale);
 }
+
+/* ─── 移动端响应式适配 (<= 768px) ────────────────────────── */
+@media (max-width: 768px) {
+  .import-page {
+    padding: 20px 14px 40px;
+  }
+
+  .upload-area :deep(.el-upload-dragger) {
+    padding: 30px 16px;
+  }
+
+  .actions {
+    display: flex;
+  }
+
+  .btn-back {
+    width: 100%;
+    justify-content: center;
+  }
+}
 </style>

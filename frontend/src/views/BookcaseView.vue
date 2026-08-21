@@ -956,4 +956,71 @@ onMounted(() => fetchBooks(true))
   0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
   40% { transform: scale(1); opacity: 1; }
 }
+
+/* ─── 移动端响应式适配 (<= 768px) ────────────────────────── */
+@media (max-width: 768px) {
+  .bookcase {
+    padding: 16px 12px 24px;
+  }
+
+  .toolbar {
+    margin-bottom: 16px;
+    gap: 10px;
+  }
+
+  .search-wrap {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .toolbar-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .btn-manage, .btn-import {
+    flex: 1;
+    justify-content: center;
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+
+  .manage-bar {
+    padding: 10px 14px;
+    margin-bottom: 16px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .manage-actions {
+    justify-content: space-between;
+    width: 100%;
+  }
+
+  .btn-manage-action {
+    flex: 1;
+    justify-content: center;
+    padding: 6px 8px;
+    font-size: 12px;
+  }
+
+  .btn-manage-done {
+    padding: 6px 14px;
+    font-size: 12px;
+  }
+
+  .book-grid {
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    gap: 16px 10px;
+  }
+
+  .book-title {
+    font-size: 13px;
+  }
+
+  .book-author {
+    font-size: 11px;
+  }
+}
 </style>

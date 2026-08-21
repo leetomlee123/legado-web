@@ -857,4 +857,57 @@ onUnmounted(() => {
 .about-card {
   opacity: 0.85;
 }
+
+/* ─── 移动端响应式适配 (<= 768px) ────────────────────────── */
+@media (max-width: 768px) {
+  .settings-page {
+    padding: 16px 12px 30px;
+    gap: 14px;
+  }
+
+  .settings-card {
+    padding: 16px 14px;
+    gap: 14px;
+  }
+
+  .proxy-input-group {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .proxy-input-group .el-button {
+    width: 100%;
+  }
+
+  .field-group-inline {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .field-group-inline .el-switch {
+    align-self: flex-end;
+  }
+
+  .health-actions-row {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .health-actions-row .el-button {
+    width: 100%;
+    margin-left: 0 !important;
+  }
+
+  .settings-bottom-bar {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .btn-reset, .btn-save {
+    width: 100%;
+    justify-content: center;
+  }
+}
 </style>

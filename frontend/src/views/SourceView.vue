@@ -1305,4 +1305,77 @@ onMounted(() => {
   color: var(--color-text-muted);
   margin: 0 0 10px;
 }
+
+/* ─── 移动端响应式适配 (<= 768px) ────────────────────────── */
+@media (max-width: 768px) {
+  .source-page {
+    padding: 16px 12px 30px;
+  }
+
+  .toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .toolbar-actions {
+    width: 100%;
+    display: flex;
+    gap: 8px;
+  }
+
+  .toolbar-actions .el-button {
+    flex: 1;
+    justify-content: center;
+  }
+
+  .source-sub-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .source-filter-tools {
+    overflow-x: auto;
+    white-space: nowrap;
+    padding-bottom: 4px;
+    -webkit-overflow-scrolling: touch;
+    width: 100%;
+  }
+
+  .health-filter-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .health-tabs {
+    overflow-x: auto;
+    white-space: nowrap;
+    padding-bottom: 4px;
+    -webkit-overflow-scrolling: touch;
+    width: 100%;
+  }
+
+  .batch-action-dock {
+    left: 12px;
+    right: 12px;
+    transform: none;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 14px;
+  }
+
+  .batch-dock-actions {
+    flex-wrap: wrap;
+    justify-content: center;
+    width: 100%;
+  }
+
+  :deep(.el-dialog) {
+    width: 92vw !important;
+    max-width: 500px;
+    margin: 20px auto !important;
+  }
+}
 </style>
