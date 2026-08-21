@@ -97,6 +97,33 @@ export async function addBookToShelf(identifier: number | string): Promise<Book>
   return res as unknown as Book
 }
 
+// 切换书源
+export async function changeBookSource(
+  identifier: number | string,
+  data: {
+    sourceId: number
+    bookUrl: string
+    name?: string
+    author?: string
+    cover?: string
+    intro?: string
+    currentChapterTitle?: string
+    currentChapterIndex?: number
+  }
+): Promise<{
+  ok: boolean
+  book: Book
+  newChapterIndex: number
+  newChapterId: number
+  newChapterTitle: string
+  totalChapters: number
+  sourceName?: string
+  message?: string
+}> {
+  const res = await http.post(`/books/${identifier}/change-source`, data)
+  return res as any
+}
+
 // 获取阅读进度
 export async function getReadProgress(identifier: number | string): Promise<ReadProgress> {
   const res = await http.get(`/books/${identifier}/progress`)

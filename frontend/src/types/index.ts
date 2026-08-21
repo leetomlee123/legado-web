@@ -12,6 +12,8 @@ export interface Book {
   bookUrl?: string
   source_id?: number
   sourceId?: number
+  source_name?: string
+  sourceName?: string
   local_path?: string
   book_group?: string
   in_bookcase?: number

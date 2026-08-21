@@ -1,4 +1,4 @@
-from book import html_to_text, parse_chapters
+from book import parse_chapters
 from epub import html_to_text as epub_html_to_text
 
 

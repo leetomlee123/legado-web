@@ -67,6 +67,17 @@ def book_json(row) -> dict:
     b["sourceType"] = b.get("source_type") or ""
     b["inBookcase"] = 1 if (b.get("in_bookcase") is None or b.get("in_bookcase") == 1) else 0
     b["uuid"] = b.get("uuid") or ""
+    b["sourceId"] = b.get("source_id") or 0
+    b["sourceUrl"] = b.get("source_url") or ""
+    if b.get("source_id"):
+        try:
+            conn = require_db()
+            s_row = conn.execute("SELECT name FROM book_source WHERE id=?", (b["source_id"],)).fetchone()
+            b["sourceName"] = s_row["name"] if s_row else ""
+        except Exception:
+            b["sourceName"] = ""
+    else:
+        b["sourceName"] = ""
     return b
 
 
@@ -221,21 +232,190 @@ def add_book_to_shelf(identifier: str):
     return jsonify(book_json(saved))
 
 
+@app.post("/api/books/<identifier>/change-source")
+def change_book_source(identifier: str):
+    """为指定书籍切换书源，重新拉取目录并智能映射章节阅读进度。"""
+    row = get_book_by_id(identifier)
+    if row is None:
+        return write_msg(404, "书籍不存在")
+    b = dict(row)
+    book_id = b["id"]
+    book_name = b.get("name") or "未知书籍"
+
+    body = request.get_json(silent=True) or {}
+    try:
+        new_source_id = int(body.get("sourceId") or body.get("source_id") or 0)
+    except (TypeError, ValueError):
+        new_source_id = 0
+    new_source_url = (body.get("bookUrl") or body.get("source_url") or body.get("sourceUrl") or "").strip()
+    new_name = (body.get("name") or "").strip()
+    new_author = (body.get("author") or "").strip()
+    new_cover = (body.get("cover") or "").strip()
+    new_intro = (body.get("intro") or "").strip()
+    curr_chapter_title = (body.get("currentChapterTitle") or "").strip()
+    try:
+        curr_chapter_idx = int(body.get("currentChapterIndex") or 0)
+    except (TypeError, ValueError):
+        curr_chapter_idx = 0
+
+    if not new_source_id or not new_source_url:
+        return write_msg(400, "缺少目标书源 ID 或书籍地址")
+
+    conn = require_db()
+    src_row = conn.execute("SELECT id, name, rule FROM book_source WHERE id=?", (new_source_id,)).fetchone()
+    if not src_row:
+        return write_msg(404, "目标书源不存在")
+
+    old_source_id = b.get("source_id") or 0
+    logger.info(
+        "[书源切换] 开始为《%s》(ID:%s) 切换书源: [原书源 ID:%s] -> [新书源: %s (ID:%s)], 新地址: %s",
+        book_name,
+        book_id,
+        old_source_id,
+        src_row["name"],
+        new_source_id,
+        new_source_url,
+    )
+
+    t0 = time.perf_counter()
+
+    # 1. 更新书籍基本信息和书源绑定
+    update_fields = ["source_id = ?", "source_url = ?", "source_type = 'web'"]
+    update_params: list[Any] = [new_source_id, new_source_url]
+
+    if new_name and not b.get("name"):
+        update_fields.append("name = ?")
+        update_params.append(new_name)
+    if new_author and not b.get("author"):
+        update_fields.append("author = ?")
+        update_params.append(new_author)
+    if new_cover and not b.get("cover"):
+        update_fields.append("cover = ?")
+        update_params.append(new_cover)
+    if new_intro and not b.get("intro"):
+        update_fields.append("intro = ?")
+        update_params.append(new_intro)
+
+    update_params.append(book_id)
+    conn.execute(f"UPDATE book SET {', '.join(update_fields)} WHERE id = ?", update_params)
+    conn.commit()
+
+    # 2. 清除旧章节缓存并从新书源同步目录
+    updated_book = dict(get_book_by_id(book_id))
+    try:
+        refresh_web_chapters(updated_book)
+    except Exception as e:
+        logger.error("[书源切换] 《%s》(ID:%s) 切换到书源 [%s] 后同步目录失败: %s", book_name, book_id, src_row["name"], e)
+        return write_msg(502, f"切换书源失败，新书源目录拉取异常：{e}")
+
+    # 3. 查询新章节列表
+    new_chapters = conn.execute(
+        "SELECT id, book_id, title, idx FROM chapter WHERE book_id=? ORDER BY idx",
+        (book_id,),
+    ).fetchall()
+
+    if not new_chapters:
+        logger.warning("[书源切换] 《%s》(ID:%s) 新书源未返回任何章节", book_name, book_id)
+        return write_msg(502, "新书源未解析到任何章节")
+
+    # 4. 智能匹配阅读进度
+    def _clean_title(t: str) -> str:
+        return re.sub(r"[\s\-_第章节回卷集部篇（）\(\)\[\]【】]", "", t).lower()
+
+    target_chapter = None
+    target_idx = 0
+
+    if curr_chapter_title:
+        clean_target = _clean_title(curr_chapter_title)
+        # 精确或清洗后完全匹配
+        for ch in new_chapters:
+            if ch["title"].strip() == curr_chapter_title.strip():
+                target_chapter = ch
+                target_idx = ch["idx"]
+                break
+        if target_chapter is None and clean_target:
+            for ch in new_chapters:
+                if _clean_title(ch["title"]) == clean_target:
+                    target_chapter = ch
+                    target_idx = ch["idx"]
+                    break
+        # 包含匹配
+        if target_chapter is None and len(clean_target) >= 2:
+            for ch in new_chapters:
+                c_title = _clean_title(ch["title"])
+                if clean_target in c_title or c_title in clean_target:
+                    target_chapter = ch
+                    target_idx = ch["idx"]
+                    break
+
+    # 若未按标题匹配成功，则按章节序号就近定位
+    if target_chapter is None:
+        target_idx = max(0, min(curr_chapter_idx, len(new_chapters) - 1))
+        target_chapter = new_chapters[target_idx]
+
+    matched_cid = int(target_chapter["id"])
+    matched_title = target_chapter["title"]
+    now = int(time.time() * 1000)
+
+    # 5. 更新阅读进度
+    conn.execute(
+        """
+        INSERT INTO read_progress (book_id, chapter_id, chapter_idx, pos, update_time)
+        VALUES (?, ?, ?, 0.0, ?)
+        ON CONFLICT(book_id) DO UPDATE SET
+            chapter_id = excluded.chapter_id,
+            chapter_idx = excluded.chapter_idx,
+            pos = 0.0,
+            update_time = excluded.update_time
+        """,
+        (book_id, matched_cid, target_idx, now),
+    )
+    conn.commit()
+
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    logger.info(
+        "[书源切换] 《%s》(ID:%s) 成功切换至 [%s (ID:%s)], 同步 %d 章, 阅读进度已定位至第 %d 章「%s」 (耗时 %dms)",
+        book_name,
+        book_id,
+        src_row["name"],
+        new_source_id,
+        len(new_chapters),
+        target_idx + 1,
+        matched_title,
+        elapsed_ms,
+    )
+
+    return jsonify({
+        "ok": True,
+        "book": book_json(get_book_by_id(book_id)),
+        "newChapterIndex": target_idx,
+        "newChapterId": matched_cid,
+        "newChapterTitle": matched_title,
+        "totalChapters": len(new_chapters),
+        "sourceName": src_row["name"],
+        "message": f"成功切换至【{src_row['name']}】",
+    })
+
+
 @app.get("/api/books/<identifier>/chapters")
 def list_chapters(identifier: str):
     b = get_book_by_id(identifier)
     if b is None:
         return write_msg(404, "书籍不存在")
     book_id = b["id"]
+    book_name = b["name"] or "未知书籍"
     conn = require_db()
     # 检查是否已有章节
     existing_count = conn.execute("SELECT COUNT(*) FROM chapter WHERE book_id=?", (book_id,)).fetchone()[0]
     if existing_count == 0 and (b["source_type"] or "") == "web":
+        logger.info("[目录加载] 《%s》(ID:%s) 本地章节库为空，开始从网络书源同步...", book_name, book_id)
         try:
             refresh_web_chapters(dict(b))
         except Exception as e:
-            print(f"[chapters] refresh book {book_id} failed: {e}")
+            logger.error("[目录加载] 《%s》(ID:%s) 网络同步章节列表失败: %s", book_name, book_id, e)
             return write_msg(502, f"解析章节列表失败：{e}")
+    else:
+        logger.info("[目录加载] 《%s》(ID:%s) 从本地数据库加载章节列表: 共 %d 章", book_name, book_id, existing_count)
 
     rows = conn.execute(
         "SELECT id, book_id, title, idx FROM chapter WHERE book_id=? ORDER BY idx",
@@ -251,23 +431,66 @@ def get_chapter_content(identifier: str, cid: int):
     if b is None:
         return write_msg(404, "书籍不存在")
     book_id = b["id"]
+    book_name = b["name"] or "未知书籍"
     conn = require_db()
     row = conn.execute(
-        "SELECT content, content_url FROM chapter WHERE id=? AND book_id=?",
+        "SELECT title, idx, content, content_url FROM chapter WHERE id=? AND book_id=?",
         (cid, book_id),
     ).fetchone()
     if row is None:
         return write_msg(404, "章节不存在")
     content = row["content"] or ""
     content_url = row["content_url"] or ""
+    chapter_title = row["title"] or ""
+    chapter_idx = row["idx"] if "idx" in row.keys() else 0
+
     if not content.strip() and content_url:
         if (b["source_type"] or "") == "web":
+            logger.info(
+                "[正文读取] 《%s》(ID:%s) 第 %d 章「%s」(CID:%s) 无正文缓存，开始从网络抓取...",
+                book_name,
+                book_id,
+                chapter_idx,
+                chapter_title,
+                cid,
+            )
+            t0 = time.perf_counter()
             try:
-                content = fetch_web_chapter(dict(b), content_url)
+                content = fetch_web_chapter(dict(b), content_url, chapter_title=chapter_title)
             except Exception as e:
+                logger.error(
+                    "[正文读取] 《%s》(ID:%s) 第 %d 章「%s」(CID:%s) 网络抓取失败: %s",
+                    book_name,
+                    book_id,
+                    chapter_idx,
+                    chapter_title,
+                    cid,
+                    e,
+                )
                 return write_msg(500, f"解析章节数据失败：{e}")
             conn.execute("UPDATE chapter SET content=? WHERE id=?", (content, cid))
             conn.commit()
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            logger.info(
+                "[正文入库] 《%s》(ID:%s) 第 %d 章「%s」(CID:%s) 正文已更新并缓存至数据库 (共 %d 字符, 抓取入库耗时 %dms)",
+                book_name,
+                book_id,
+                chapter_idx,
+                chapter_title,
+                cid,
+                len(content),
+                elapsed_ms,
+            )
+    else:
+        logger.info(
+            "[正文读取] 《%s》(ID:%s) 第 %d 章「%s」(CID:%s) 命中本地数据库缓存 (共 %d 字符)",
+            book_name,
+            book_id,
+            chapter_idx,
+            chapter_title,
+            cid,
+            len(content),
+        )
     return jsonify({"content": content})
 
 
@@ -378,9 +601,13 @@ def get_book_detail(identifier: str):
     if b is None or (b["source_type"] or "") != "web":
         return write_msg(404, "非网络书")
     book_id = b["id"]
+    book_name = b["name"] or "未知书籍"
+    logger.info("[书籍详情] 开始抓取《%s》(ID:%s) 的网络书源详情信息...", book_name, book_id)
+    t0 = time.perf_counter()
     try:
         detail = crawl_book_detail(dict(b))
     except Exception as e:
+        logger.error("[书籍详情] 《%s》(ID:%s) 详情抓取失败: %s", book_name, book_id, e)
         return write_msg(500, str(e))
     intro = detail.intro or b["intro"]
     author = detail.author or b["author"]
@@ -391,6 +618,8 @@ def get_book_detail(identifier: str):
         (intro, author, cover, book_id),
     )
     conn.commit()
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    logger.info("[书籍详情] 《%s》(ID:%s) 详情信息已更新并同步入库 (耗时 %dms)", book_name, book_id, elapsed_ms)
     out = book_json(b)
     out["intro"] = intro
     out["author"] = author
@@ -474,30 +703,60 @@ def preview_toc():
     except (TypeError, ValueError):
         source_id = 0
     book_url = (body.get("bookUrl") or body.get("source_url") or "").strip()
+    book_name = (body.get("name") or body.get("bookName") or "").strip()
     if not source_id or not book_url:
         return write_msg(400, "缺少 sourceId 或 bookUrl")
 
-    from source import source_by_id, _rule_for_source, _toc_url, crawl_toc, fetch_url
+    from source import source_by_id, _rule_for_source, _resolve_toc_url, fetch_all_toc
 
     src = source_by_id(source_id)
     if not src:
+        logger.warning("[目录预览] 书源 ID:%s 不存在", source_id)
         return write_msg(404, "书源不存在")
     try:
         rule = _rule_for_source(src)
     except ValueError as e:
+        logger.warning("[目录预览] [%s (ID:%s)] 书源规则无效: %s", src["name"], source_id, e)
         return write_msg(400, str(e))
     if rule.toc is None or not rule.toc.selector:
+        logger.warning("[目录预览] [%s (ID:%s)] 该书源无目录规则", src["name"], source_id)
         return write_msg(400, "该书源无目录规则")
 
-    fake_book = {"source_id": source_id, "source_url": book_url, "id": 0}
-    toc_url = _toc_url(fake_book, rule)
+    fake_book = {"source_id": source_id, "source_url": book_url, "id": 0, "name": book_name}
+    toc_url, initial_html = _resolve_toc_url(fake_book, rule, book_name=book_name)
     if not toc_url:
+        logger.warning("[目录预览] [%s (ID:%s)] 无法确定目录地址", src["name"], source_id)
         return write_msg(400, "无法确定目录地址")
+
+    t0 = time.perf_counter()
+    logger.info(
+        "[目录预览] [%s (ID:%s)] 开始实时免入库预览目录%s -> %s",
+        src["name"],
+        source_id,
+        f"《{book_name}》" if book_name else "",
+        toc_url,
+    )
     try:
-        html = fetch_url(toc_url)
+        chapters = fetch_all_toc(
+            toc_url,
+            rule.toc,
+            source_name=src["name"],
+            source_id=source_id,
+            book_name=book_name,
+            initial_html=initial_html,
+        )
     except Exception as e:
+        logger.error("[目录预览] [%s (ID:%s)] 目录抓取失败: %s (URL: %s)", src["name"], source_id, e, toc_url)
         return write_msg(502, f"目录抓取失败：{e}")
-    chapters = crawl_toc(html, rule.toc, toc_url)
+
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    logger.info(
+        "[目录预览] [%s (ID:%s)] 免入库目录预览解析完成: 共 %d 个章节 (总耗时 %dms)",
+        src["name"],
+        source_id,
+        len(chapters),
+        elapsed_ms,
+    )
     return jsonify(
         [{"index": i, "title": c["title"], "chapterUrl": c["chapterUrl"]} for i, c in enumerate(chapters)]
     )
@@ -512,16 +771,42 @@ def preview_content():
     except (TypeError, ValueError):
         source_id = 0
     chapter_url = (body.get("chapterUrl") or "").strip()
+    chapter_title = (body.get("title") or body.get("chapterTitle") or "").strip()
+    book_name = (body.get("bookName") or body.get("name") or "").strip()
+
     if not source_id or not chapter_url:
         return write_msg(400, "缺少 sourceId 或 chapterUrl")
 
-    from source import source_by_id, _rule_for_source, fetch_web_chapter
+    from source import source_by_id, fetch_web_chapter
 
-    fake_book = {"source_id": source_id, "source_url": "", "id": 0}
+    src = source_by_id(source_id)
+    src_name = src["name"] if src else f"ID:{source_id}"
+
+    t0 = time.perf_counter()
+    logger.info(
+        "[正文预览] [%s (ID:%s)] 收到实时免入库正文预览请求: %s%s -> %s",
+        src_name,
+        source_id,
+        f"《{book_name}》" if book_name else "",
+        f"「{chapter_title}」" if chapter_title else "",
+        chapter_url,
+    )
+
+    fake_book = {"source_id": source_id, "source_url": "", "id": 0, "name": book_name}
     try:
-        content = fetch_web_chapter(fake_book, chapter_url)
+        content = fetch_web_chapter(fake_book, chapter_url, chapter_title=chapter_title)
     except Exception as e:
+        logger.error("[正文预览] [%s (ID:%s)] 实时正文抓取失败: %s (URL: %s)", src_name, source_id, e, chapter_url)
         return write_msg(502, f"章节抓取失败：{e}")
+
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    logger.info(
+        "[正文预览] [%s (ID:%s)] 实时免入库正文解析完成: 长度 %d 字符 (总耗时 %dms)",
+        src_name,
+        source_id,
+        len(content),
+        elapsed_ms,
+    )
     return jsonify({"content": content})
 
 
@@ -1057,15 +1342,16 @@ def _execute_single_source_search(
     keyword: str,
     stop_event: threading.Event | None = None,
 ) -> dict:
-    from source import fetch_search_response
+    from source import fetch_search_response, crawl_search
     from settings import get_timeout
 
     if stop_event and stop_event.is_set():
         return {"sourceId": sid, "sourceName": name, "books": [], "error": "cancelled"}
 
+    total_t0 = time.perf_counter()
     rule = parse_legado_rule(rule_str)
     if rule is None or rule.search is None or not rule.search.url:
-        logger.warning("[%s (ID:%s)] 缺少有效搜索规则", name, sid)
+        logger.warning("[搜索规则] [%s (ID:%s)] 缺少有效搜索规则 (searchUrl 为空)", name, sid)
         return {"sourceId": sid, "sourceName": name, "books": [], "error": "无搜索规则"}
 
     search_spec = rule.search.url
@@ -1074,24 +1360,46 @@ def _execute_single_source_search(
     if stop_event and stop_event.is_set():
         return {"sourceId": sid, "sourceName": name, "books": [], "error": "cancelled"}
 
+    logger.info("[搜索任务] [%s (ID:%s)] 开始检索关键词「%s」 (超时设定: %ds)", name, sid, keyword, timeout)
     try:
-        html, final_url = fetch_search_response(search_spec, keyword, timeout=timeout, base_url=rule.base_url)
+        html, final_url = fetch_search_response(
+            search_spec,
+            keyword,
+            timeout=timeout,
+            base_url=rule.base_url,
+            source_name=name,
+            source_id=sid,
+        )
     except Exception as e:
         if stop_event and stop_event.is_set():
             return {"sourceId": sid, "sourceName": name, "books": [], "error": "cancelled"}
-        logger.warning("[%s (ID:%s)] 搜索请求失败: %s", name, sid, e)
+        logger.warning("[搜索网络] [%s (ID:%s)] 搜索请求异常: %s", name, sid, e)
         return {"sourceId": sid, "sourceName": name, "books": [], "error": str(e)}
 
     if stop_event and stop_event.is_set():
         return {"sourceId": sid, "sourceName": name, "books": [], "error": "cancelled"}
 
     try:
-        books = crawl_search(html, rule.search, final_url)
+        books = crawl_search(
+            html,
+            rule.search,
+            final_url,
+            source_name=name,
+            source_id=sid,
+        )
     except Exception as e:
-        logger.warning("[%s (ID:%s)] 规则解析失败: %s", name, sid, e)
+        logger.warning("[搜索解析] [%s (ID:%s)] 规则解析异常: %s", name, sid, e)
         return {"sourceId": sid, "sourceName": name, "books": [], "error": str(e)}
 
-    logger.info("[%s (ID:%s)] 检索「%s」完成: 返回 %d 本书", name, sid, keyword, len(books))
+    total_elapsed_ms = int((time.perf_counter() - total_t0) * 1000)
+    logger.info(
+        "[搜索完成] [%s (ID:%s)] 检索「%s」全部完成: 成功获取 %d 本书籍 (总耗时 %dms)",
+        name,
+        sid,
+        keyword,
+        len(books),
+        total_elapsed_ms,
+    )
     for b in books:
         b["sourceId"] = sid
         b["sourceType"] = "web"
@@ -1202,10 +1510,10 @@ def search_stream():
                     continue
 
             if not stop_event.is_set():
-                logger.info("流式搜索正常完成: 关键词「%s」, 共检索到 %d 本书籍", keyword, total_books)
+                logger.info("流式多源搜索正常完成: 关键词「%s」, 共检索到 %d 本书籍", keyword, total_books)
                 yield f"data: {json.dumps({'type': 'done', 'totalBooks': total_books}, ensure_ascii=False)}\n\n"
         except (GeneratorExit, ConnectionResetError, BrokenPipeError):
-            logger.info("检测到客户端主动断开/离开搜索页: 关键词「%s」, 立即终止后台剩余检索 (已完成 %d/%d)", keyword, completed, total_sources)
+            logger.info("检测到客户端主动断开/离开搜索页: 关键词「%s」, 任务ID: %s, 立即终止后台剩余检索 (已完成 %d/%d 个书源)", keyword, search_id, completed, total_sources)
         finally:
             # 立即触发全局中止信号，释放所有后台线程与网络请求
             stop_event.set()
@@ -1217,7 +1525,7 @@ def search_stream():
                 pass
             with _active_search_lock:
                 _active_search_events.pop(search_id, None)
-            logger.info("已彻底销毁后台搜索线程池: 关键词「%s」", keyword)
+            logger.info("已彻底销毁后台搜索线程池: 关键词「%s」, 任务ID: %s", keyword, search_id)
 
     return Response(
         generate(),
@@ -1257,6 +1565,8 @@ def search_all():
 
     results = []
     if rows:
+        t0 = time.perf_counter()
+        logger.info("发起全量并发搜索: 关键词「%s」, 启用书源数: %d", keyword, len(rows))
         with ThreadPoolExecutor(max_workers=min(12, len(rows))) as executor:
             futures = [
                 executor.submit(
@@ -1273,6 +1583,9 @@ def search_all():
                     results.append(f.result())
                 except Exception:
                     pass
+        total_elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        total_books = sum(len(r.get("books", [])) for r in results)
+        logger.info("全量并发搜索完成: 关键词「%s」, 耗时 %dms, 共检索到 %d 本书籍", keyword, total_elapsed_ms, total_books)
 
     return jsonify(results)
 

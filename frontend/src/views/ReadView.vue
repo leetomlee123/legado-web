@@ -22,6 +22,25 @@
         <span class="dock-label">目录</span>
       </button>
 
+      <!-- 换源 -->
+      <button
+        class="dock-item"
+        id="dock-source-btn"
+        :class="{ active: showChangeSource }"
+        title="切换书源"
+        aria-label="切换书源"
+        @click="openChangeSourceModal"
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M16 3h5v5"/>
+          <path d="M4 20L21 3"/>
+          <path d="M21 16v5h-5"/>
+          <path d="M15 15l6 6"/>
+          <path d="M4 4l5 5"/>
+        </svg>
+        <span class="dock-label">换源</span>
+      </button>
+
       <!-- 书架/返回 -->
       <button
         class="dock-item"
@@ -158,6 +177,12 @@
                 <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
               </svg>
               {{ currentBook?.author || '佚名' }}
+            </span>
+            <span v-if="currentBook?.sourceName" class="meta-item source-meta-click" @click="openChangeSourceModal" title="点击快速切换书源">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/>
+              </svg>
+              源: {{ currentBook.sourceName }}
             </span>
             <span v-if="content" class="meta-item">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -439,6 +464,132 @@
         </div>
       </transition>
     </Teleport>
+
+    <!-- ── 起点风格 换源抽屉 ─────────────────────────────── -->
+    <Teleport to="body">
+      <transition name="drawer-slide-right">
+        <div
+          v-if="showChangeSource"
+          class="qd-source-overlay"
+          :class="[`theme-${theme}`]"
+          :style="readerStyleVars"
+          @click.self="closeChangeSourceModal"
+          role="dialog"
+          aria-modal="true"
+          aria-label="切换书源"
+        >
+          <div class="qd-source-drawer">
+            <!-- 头部 -->
+            <div class="source-drawer-head">
+              <div class="source-head-info">
+                <span class="source-drawer-title">切换书源</span>
+                <span class="source-cur-tag" v-if="currentBook?.sourceName">
+                  当前: {{ currentBook.sourceName }}
+                </span>
+              </div>
+              <button class="qd-close-btn" aria-label="关闭换源" @click="closeChangeSourceModal">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+              </button>
+            </div>
+
+            <!-- 搜索栏 -->
+            <div class="source-search-bar">
+              <input
+                v-model="sourceSearchKeyword"
+                type="search"
+                class="source-search-input"
+                placeholder="输入书名搜索同名书籍..."
+                @keyup.enter="startSourceSearch"
+              />
+              <button
+                class="btn-source-search"
+                :disabled="searchingSources"
+                @click="startSourceSearch"
+              >
+                <svg v-if="!searchingSources" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                </svg>
+                <span v-else class="spin-dot"></span>
+                {{ searchingSources ? '检索中' : '搜索' }}
+              </button>
+            </div>
+
+            <!-- 检索状态条 -->
+            <div class="source-search-status">
+              <span class="status-left">
+                <span v-if="searchingSources" class="status-loading-text">
+                  <span class="spin-dot"></span>
+                  正在全网多源检索 ({{ sourceSearchCompleted }}/{{ sourceSearchTotal }})...
+                </span>
+                <span v-else-if="sourceSearchResults.length" class="status-count-text">
+                  共检索到 <strong>{{ sourceSearchResults.length }}</strong> 个可用书源
+                </span>
+                <span v-else class="status-empty-text">未检索到完全匹配的书源</span>
+              </span>
+              <div class="status-right-tools">
+                <label class="exact-match-toggle" title="只显示与书名完全一致的书源">
+                  <input type="checkbox" v-model="exactMatchOnly" />
+                  <span>仅完全匹配</span>
+                </label>
+                <button
+                  v-if="searchingSources"
+                  class="btn-stop-source-search"
+                  @click="stopSourceSearch"
+                >
+                  停止检索
+                </button>
+              </div>
+            </div>
+
+            <!-- 候选书源列表 -->
+            <div class="source-results-scroll" role="list">
+              <div v-if="!sourceSearchResults.length && !searchingSources" class="source-empty-state">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                </svg>
+                <p>未搜索到其他可用书源</p>
+                <span>您可以尝试修改搜索词，或前往“书源管理”导入更多书源规则</span>
+              </div>
+
+              <div
+                v-for="(item, idx) in sourceSearchResults"
+                :key="item.sourceId + '_' + item.bookUrl + '_' + idx"
+                class="source-candidate-card"
+                :class="{ 'is-current': isCurrentSource(item) }"
+                role="listitem"
+              >
+                <div class="candidate-top">
+                  <div class="candidate-source-name">
+                    <span class="source-pill">{{ item.sourceName }}</span>
+                    <span v-if="isCurrentSource(item)" class="badge-current">当前在读</span>
+                  </div>
+                  <button
+                    class="btn-switch-source"
+                    :class="{ 'btn-using': isCurrentSource(item) }"
+                    :disabled="isCurrentSource(item) || switchingSourceId === item.sourceId"
+                    @click="onSelectSwitchSource(item)"
+                  >
+                    <span v-if="switchingSourceId === item.sourceId" class="spin-dot"></span>
+                    <span v-if="isCurrentSource(item)">使用中</span>
+                    <span v-else-if="switchingSourceId === item.sourceId">切换中...</span>
+                    <span v-else>切换至此源</span>
+                  </button>
+                </div>
+
+                <div class="candidate-book-info">
+                  <span class="candidate-title">《{{ item.name }}》</span>
+                  <span class="candidate-author">{{ item.author || '作者不详' }}</span>
+                </div>
+
+                <p v-if="item.intro" class="candidate-intro">{{ item.intro }}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </transition>
+    </Teleport>
   </div>
 </template>
 
@@ -453,6 +604,8 @@ import {
   addBookToShelf,
   getReadProgress,
   saveReadProgress,
+  changeBookSource,
+  searchStream,
 } from '@/api'
 import type { Book, Chapter } from '@/types'
 
@@ -479,6 +632,48 @@ const showToc = ref(false)
 const showSettings = ref(false)
 const tocKeyword = ref('')
 const isReverseOrder = ref(false)
+
+// ── 换源相关状态 ─────────────────────────────────────────
+interface CandidateSourceItem {
+  sourceId: number
+  sourceName: string
+  name: string
+  author?: string
+  cover?: string
+  intro?: string
+  bookUrl: string
+}
+
+const showChangeSource = ref(false)
+const sourceSearchKeyword = ref('')
+const exactMatchOnly = ref(true)
+const searchingSources = ref(false)
+const rawSourceSearchResults = ref<CandidateSourceItem[]>([])
+const sourceSearchCompleted = ref(0)
+const sourceSearchTotal = ref(0)
+const switchingSourceId = ref<number | null>(null)
+let cancelSourceSearchStream: (() => void) | null = null
+
+function cleanBookTitle(t: string): string {
+  return (t || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[《》\(\)\[\]【】\s\-_·:：]/g, '')
+}
+
+const sourceSearchResults = computed(() => {
+  if (!exactMatchOnly.value) {
+    return rawSourceSearchResults.value
+  }
+  const targetClean = cleanBookTitle(sourceSearchKeyword.value || currentBook.value?.name || '')
+  if (!targetClean) {
+    return rawSourceSearchResults.value
+  }
+  return rawSourceSearchResults.value.filter((item) => {
+    const itemClean = cleanBookTitle(item.name)
+    return itemClean === targetClean
+  })
+})
 
 // 过滤与排序后的目录章节
 const filteredChapters = computed(() => {
@@ -793,12 +988,140 @@ async function onAddToShelf() {
   }
 }
 
+// ── 换源方法 ─────────────────────────────────────────────
+function openChangeSourceModal() {
+  if (currentBook.value?.source_type && currentBook.value.source_type !== 'web') {
+    ElMessage.info('当前为本地导入书籍，仅网络书源书籍支持换源')
+    return
+  }
+  showChangeSource.value = true
+  sourceSearchKeyword.value = currentBook.value?.name || ''
+  if (sourceSearchResults.value.length === 0) {
+    startSourceSearch()
+  }
+}
+
+function closeChangeSourceModal() {
+  showChangeSource.value = false
+  stopSourceSearch()
+}
+
+function stopSourceSearch() {
+  if (cancelSourceSearchStream) {
+    cancelSourceSearchStream()
+    cancelSourceSearchStream = null
+  }
+  searchingSources.value = false
+}
+
+function startSourceSearch() {
+  stopSourceSearch()
+  const kw = sourceSearchKeyword.value.trim()
+  if (!kw) {
+    ElMessage.warning('请输入搜索书名')
+    return
+  }
+
+  rawSourceSearchResults.value = []
+  searchingSources.value = true
+  sourceSearchCompleted.value = 0
+  sourceSearchTotal.value = 0
+
+  const seenUrls = new Set<string>()
+
+  cancelSourceSearchStream = searchStream(
+    kw,
+    undefined,
+    (data) => {
+      if (data.type === 'start') {
+        sourceSearchTotal.value = data.totalSources || 0
+      } else if (data.type === 'source_result') {
+        sourceSearchCompleted.value = data.completed || 0
+        sourceSearchTotal.value = data.totalSources || 0
+        if (data.books && data.books.length) {
+          for (const b of data.books) {
+            const anyB = b as any
+            const bUrl = anyB.bookUrl || anyB.source_url || anyB.sourceUrl || ''
+            const sid = Number(data.sourceId || anyB.sourceId || anyB.source_id || 0)
+            const key = `${sid}_${bUrl}`
+            if (bUrl && sid && !seenUrls.has(key)) {
+              seenUrls.add(key)
+              rawSourceSearchResults.value.push({
+                sourceId: sid,
+                sourceName: data.sourceName || anyB.sourceName || '未知书源',
+                name: b.name,
+                author: b.author || '',
+                cover: b.cover || '',
+                intro: b.intro || '',
+                bookUrl: bUrl,
+              })
+            }
+          }
+        }
+      } else if (data.type === 'done') {
+        searchingSources.value = false
+      }
+    },
+    () => {
+      searchingSources.value = false
+    },
+    (err) => {
+      console.debug('[source search stream err]', err)
+      searchingSources.value = false
+    }
+  )
+}
+
+function isCurrentSource(item: CandidateSourceItem): boolean {
+  if (!currentBook.value) return false
+  const curSid = Number(currentBook.value.source_id || currentBook.value.sourceId || 0)
+  const curUrl = currentBook.value.source_url || currentBook.value.sourceUrl || ''
+  return curSid === item.sourceId || (Boolean(curUrl) && curUrl === item.bookUrl)
+}
+
+async function onSelectSwitchSource(item: CandidateSourceItem) {
+  if (switchingSourceId.value !== null) return
+  if (!identifier.value) return
+
+  switchingSourceId.value = item.sourceId
+  try {
+    const curTitle = currentChapterTitle.value
+    const curIdx = chapterIndex.value
+    const res = await changeBookSource(identifier.value, {
+      sourceId: item.sourceId,
+      bookUrl: item.bookUrl,
+      name: item.name,
+      author: item.author,
+      cover: item.cover,
+      intro: item.intro,
+      currentChapterTitle: curTitle,
+      currentChapterIndex: curIdx,
+    })
+
+    if (res && res.ok) {
+      currentBook.value = res.book
+      contentCache.value.clear()
+      showChangeSource.value = false
+      ElMessage.success(res.message || `已成功切换至【${item.sourceName}】`)
+      // 重新加载章节目录和阅读内容
+      await initBookAndChapters()
+    } else {
+      throw new Error(res?.message || '换源响应异常')
+    }
+  } catch (e: any) {
+    ElMessage.error(e.message || '切换书源失败，请重试')
+  } finally {
+    switchingSourceId.value = null
+  }
+}
+
 // ── 键盘快捷键监听 ───────────────────────────────────────
 function onKeyDown(e: KeyboardEvent) {
-  if (showToc.value || showSettings.value) {
+  if (showToc.value || showSettings.value || showChangeSource.value) {
     if (e.key === 'Escape') {
       showToc.value = false
       showSettings.value = false
+      closeChangeSourceModal()
     }
     return
   }
@@ -815,6 +1138,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  stopSourceSearch()
   window.removeEventListener('keydown', onKeyDown)
 })
 </script>
@@ -1542,6 +1866,320 @@ onUnmounted(() => {
   font-weight: 500;
 }
 
+.source-meta-click {
+  cursor: pointer;
+  color: var(--color-accent, #c0692e);
+  transition: opacity 0.15s ease;
+}
+
+.source-meta-click:hover {
+  opacity: 0.8;
+  text-decoration: underline;
+}
+
+/* ─── 换源抽屉样式 ────────────────────────────────────────── */
+.qd-source-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
+  z-index: 2000;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.qd-source-drawer {
+  width: 460px;
+  max-width: 90vw;
+  height: 100%;
+  background: var(--qd-page-bg, #fff);
+  color: var(--qd-text-color, #262626);
+  display: flex;
+  flex-direction: column;
+  box-shadow: -4px 0 24px rgba(0, 0, 0, 0.15);
+  position: relative;
+  box-sizing: border-box;
+}
+
+.source-drawer-head {
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.source-head-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.source-drawer-title {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--qd-text-color, #262626);
+}
+
+.source-cur-tag {
+  font-size: 11.5px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(184, 134, 58, 0.12);
+  color: var(--color-accent, #b8863a);
+  border: 1px solid rgba(184, 134, 58, 0.25);
+}
+
+.source-search-bar {
+  display: flex;
+  gap: 8px;
+  padding: 14px 20px 10px;
+}
+
+.source-search-input {
+  flex: 1;
+  padding: 9px 12px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.02);
+  color: inherit;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s ease;
+}
+
+.source-search-input:focus {
+  border-color: var(--color-accent, #b8863a);
+  background: #fff;
+}
+
+.btn-source-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 16px;
+  background: var(--color-accent, #b8863a);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.15s ease;
+}
+
+.btn-source-search:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.btn-source-search:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.source-search-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 20px 10px;
+  font-size: 12px;
+  color: #888;
+  border-bottom: 1px dashed rgba(0, 0, 0, 0.06);
+}
+
+.status-loading-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-accent, #b8863a);
+}
+
+.status-count-text strong {
+  color: var(--color-accent, #b8863a);
+}
+
+.status-right-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.exact-match-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--qd-text-color, #555);
+  cursor: pointer;
+  user-select: none;
+}
+
+.exact-match-toggle input {
+  cursor: pointer;
+  accent-color: var(--color-accent, #b8863a);
+}
+
+.btn-stop-source-search {
+  background: none;
+  border: 1px solid rgba(245, 34, 45, 0.4);
+  color: #f5222d;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.btn-stop-source-search:hover {
+  background: rgba(245, 34, 45, 0.08);
+}
+
+.source-results-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.source-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+  text-align: center;
+  color: #999;
+}
+
+.source-empty-state svg {
+  margin-bottom: 12px;
+  opacity: 0.5;
+}
+
+.source-empty-state p {
+  font-size: 14px;
+  font-weight: 500;
+  margin: 0 0 4px;
+  color: #666;
+}
+
+.source-empty-state span {
+  font-size: 12px;
+  color: #999;
+}
+
+.source-candidate-card {
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: rgba(0, 0, 0, 0.015);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: all 0.2s ease;
+}
+
+.source-candidate-card:hover {
+  border-color: rgba(184, 134, 58, 0.35);
+  background: rgba(184, 134, 58, 0.03);
+}
+
+.source-candidate-card.is-current {
+  border-color: rgba(46, 125, 110, 0.35);
+  background: rgba(46, 125, 110, 0.04);
+}
+
+.candidate-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.candidate-source-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.source-pill {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-accent, #b8863a);
+  background: rgba(184, 134, 58, 0.12);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.badge-current {
+  font-size: 11px;
+  color: #2e7d6e;
+  background: rgba(46, 125, 110, 0.12);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.btn-switch-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 4px;
+  border: 1px solid var(--color-accent, #b8863a);
+  background: var(--color-accent, #b8863a);
+  color: #fff;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-switch-source:hover:not(:disabled) {
+  opacity: 0.9;
+  transform: translateY(-1px);
+}
+
+.btn-switch-source:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.btn-switch-source.btn-using {
+  background: transparent;
+  color: #2e7d6e;
+  border-color: rgba(46, 125, 110, 0.4);
+}
+
+.candidate-book-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.candidate-title {
+  font-weight: 600;
+  color: inherit;
+}
+
+.candidate-author {
+  font-size: 12px;
+  color: #888;
+}
+
+.candidate-intro {
+  font-size: 12px;
+  color: #777;
+  line-height: 1.5;
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 /* ─── 动效 ────────────────────────────────────────────────── */
 .spin {
   animation: spin 1s linear infinite;
@@ -1569,6 +2207,26 @@ onUnmounted(() => {
 
 .drawer-slide-enter-active .qd-toc-drawer,
 .drawer-slide-leave-active .qd-toc-drawer {
+  transition: transform 0.25s ease-out;
+}
+
+.drawer-slide-right-enter-active,
+.drawer-slide-right-leave-active {
+  transition: opacity 0.25s, transform 0.25s;
+}
+
+.drawer-slide-right-enter-from,
+.drawer-slide-right-leave-to {
+  opacity: 0;
+}
+
+.drawer-slide-right-enter-from .qd-source-drawer,
+.drawer-slide-right-leave-to .qd-source-drawer {
+  transform: translateX(100%);
+}
+
+.drawer-slide-right-enter-active .qd-source-drawer,
+.drawer-slide-right-leave-active .qd-source-drawer {
   transition: transform 0.25s ease-out;
 }
 

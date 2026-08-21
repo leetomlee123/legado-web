@@ -9,6 +9,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any
+import urllib.parse
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, Tag
@@ -40,24 +41,42 @@ def decode_http_response(resp) -> str:
         return content.decode("gb18030", errors="replace")
 
 
-def fetch_url(url: str, timeout: float = 20, base_url: str = "") -> str:
+def fetch_url(url: str, timeout: float = 20, base_url: str = "", context: str = "") -> str:
+    t0 = time.perf_counter()
     url = (url or "").strip()
     if base_url and not (url.startswith("http://") or url.startswith("https://")):
         url = urljoin(base_url, url)
     if not (url.startswith("http://") or url.startswith("https://")):
         raise ValueError(f"无效的请求地址: {url}")
 
-    resp = cffi_requests.get(
-        url,
-        impersonate="chrome120",
-        timeout=timeout,
-        headers={"User-Agent": UA},
-        allow_redirects=True,
-        proxy=get_proxy() or None,
-        verify=False,
-    )
-    resp.raise_for_status()
-    return decode_http_response(resp)
+    ctx_label = f"[{context}] " if context else ""
+    logger.info("%s发起 GET 网络请求: %s (超时: %ds)", ctx_label, url, int(timeout))
+    try:
+        resp = cffi_requests.get(
+            url,
+            impersonate="chrome120",
+            timeout=timeout,
+            headers={"User-Agent": UA},
+            allow_redirects=True,
+            proxy=get_proxy() or None,
+            verify=False,
+        )
+        resp.raise_for_status()
+        html = decode_http_response(resp)
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        logger.info(
+            "%sGET 请求成功: 状态码 %d, 耗时 %dms, 响应大小 %d 字节, 最终URL: %s",
+            ctx_label,
+            resp.status_code,
+            elapsed_ms,
+            len(resp.content or b""),
+            str(resp.url or url),
+        )
+        return html
+    except Exception as e:
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        logger.warning("%sGET 请求失败: %s (耗时 %dms, URL: %s)", ctx_label, e, elapsed_ms, url)
+        raise
 
 
 def fetch_subscription_url(url: str, timeout: float = 30) -> tuple[str, int]:
@@ -545,6 +564,19 @@ def _strip_js_pos_and_slice(selector: str) -> tuple[str, int | None, tuple[int |
     return s, None, None
 
 
+def sanitize_css_selector(sel: str) -> str:
+    """自动修复未加双引号的包含特殊符号的属性选择器（如 [href*=book/chapter] -> [href*="book/chapter"]）。"""
+    if not (sel or "").strip():
+        return ""
+    def _fix_attr(m):
+        attr_op = m.group(1)
+        val = m.group(2).strip()
+        if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+            return f"[{attr_op}{val}]"
+        return f'[{attr_op}"{val}"]'
+    return re.sub(r'\[([a-zA-Z0-9_\-]+[*~|^$]?=)([^\]]+)\]', _fix_attr, sel)
+
+
 def safe_select(el: Tag, selector: str) -> list[Tag]:
     if not (selector or "").strip():
         return []
@@ -567,10 +599,30 @@ def safe_select(el: Tag, selector: str) -> list[Tag]:
         return out
 
     base, pos_idx, slice_args = _strip_js_pos_and_slice(selector)
-    try:
-        found = list(el.select(base)) if base else [el]
-    except Exception:
-        return []
+    if not base:
+        return [el]
+
+    # 支持 text.关键词 伪选择器
+    if base.startswith("text."):
+        kw = base[5:].strip()
+        matched = []
+        for tag in el.find_all("a"):
+            if kw in tag.get_text():
+                matched.append(tag)
+        if not matched:
+            for tag in el.find_all():
+                if kw in tag.get_text() and not any(kw in child.get_text() for child in tag.find_all()):
+                    matched.append(tag)
+        found = matched
+    else:
+        sanitized_base = sanitize_css_selector(base)
+        try:
+            found = list(el.select(sanitized_base))
+        except Exception:
+            try:
+                found = list(el.select(base))
+            except Exception:
+                found = []
 
     if slice_args is not None:
         start, stop = slice_args
@@ -653,7 +705,14 @@ def extract_legado_search_url_spec(spec: str, base_url: str = "") -> str:
     return spec.strip()
 
 
-def fetch_search_response(search_spec: str, keyword: str, timeout: int = 15, base_url: str = "") -> tuple[str, str]:
+def fetch_search_response(
+    search_spec: str,
+    keyword: str,
+    timeout: int = 15,
+    base_url: str = "",
+    source_name: str = "",
+    source_id: int | str = "",
+) -> tuple[str, str]:
     """
     支持 Legado 3.0 标准的 searchUrl 规范：
     1. 简单 GET URL: https://example.com/s?q={{key}}
@@ -668,8 +727,11 @@ def fetch_search_response(search_spec: str, keyword: str, timeout: int = 15, bas
     """
     import urllib.parse
 
+    src_label = f"{source_name} (ID:{source_id})" if (source_name or source_id) else "搜索请求"
+
     spec = extract_legado_search_url_spec(search_spec, base_url)
     if not spec:
+        logger.warning("[搜索网络] [%s] searchUrl 为空或无法解析: %s", src_label, search_spec)
         raise ValueError("searchUrl 为空或无法解析")
 
     url = spec
@@ -719,15 +781,17 @@ def fetch_search_response(search_spec: str, keyword: str, timeout: int = 15, bas
 
     # 检验 URL 合法性
     if not (target_url.startswith("http://") or target_url.startswith("https://")):
+        logger.warning("[搜索网络] [%s] 无效的书源搜索地址: %s", src_label, target_url or search_spec)
         raise ValueError(f"无效的书源搜索地址: {target_url or search_spec}")
 
     req_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": UA,
     }
     if "headers" in options and isinstance(options["headers"], dict):
         req_headers.update(options["headers"])
 
     raw_body = options.get("body")
+    post_data = None
 
     if method == "POST":
         if raw_body is not None:
@@ -745,40 +809,83 @@ def fetch_search_response(search_spec: str, keyword: str, timeout: int = 15, bas
             if "Content-Type" not in req_headers:
                 req_headers["Content-Type"] = "application/x-www-form-urlencoded"
 
-        resp = cffi_requests.post(
+        body_preview = str(post_data)[:80] if post_data is not None else ""
+        logger.info(
+            "[搜索网络] [%s] 发起 HTTP POST 请求: %s (编码: %s, 超时: %ds, 载荷: %s)",
+            src_label,
             target_url,
-            data=post_data,
-            headers=req_headers,
-            impersonate="chrome120",
-            timeout=timeout,
-            proxy=get_proxy() or None,
-            verify=False,
+            charset,
+            timeout,
+            body_preview,
         )
     else:
         # GET 请求
         if "?" not in target_url and ("{{key}}" not in search_spec and "{search}" not in search_spec):
             target_url = f"{target_url}?keyword={esc}"
-        resp = cffi_requests.get(
+        logger.info(
+            "[搜索网络] [%s] 发起 HTTP GET 请求: %s (编码: %s, 超时: %ds)",
+            src_label,
             target_url,
-            headers=req_headers,
-            impersonate="chrome120",
-            timeout=timeout,
-            proxy=get_proxy() or None,
-            verify=False,
+            charset,
+            timeout,
         )
 
-    content = resp.content
+    t0 = time.perf_counter()
     try:
-        if charset in ("GBK", "GB2312", "GB18030"):
-            html = content.decode(charset.lower(), errors="replace")
+        if method == "POST":
+            resp = cffi_requests.post(
+                target_url,
+                data=post_data,
+                headers=req_headers,
+                impersonate="chrome120",
+                timeout=timeout,
+                proxy=get_proxy() or None,
+                verify=False,
+            )
         else:
-            html = resp.text
-            if "charset=gbk" in html.lower() or "charset=gb2312" in html.lower():
-                html = content.decode("gbk", errors="replace")
-    except Exception:
-        html = resp.text
+            resp = cffi_requests.get(
+                target_url,
+                headers=req_headers,
+                impersonate="chrome120",
+                timeout=timeout,
+                proxy=get_proxy() or None,
+                verify=False,
+            )
 
-    return html, str(resp.url or target_url)
+        resp.raise_for_status()
+        content = resp.content or b""
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+
+        try:
+            if charset in ("GBK", "GB2312", "GB18030"):
+                html = content.decode(charset.lower(), errors="replace")
+            else:
+                html = resp.text
+                if "charset=gbk" in html.lower() or "charset=gb2312" in html.lower():
+                    html = content.decode("gbk", errors="replace")
+        except Exception:
+            html = resp.text
+
+        logger.info(
+            "[搜索网络] [%s] HTTP 响应成功: 状态码 %d, 耗时 %dms, 响应大小 %d 字节, 最终URL: %s",
+            src_label,
+            resp.status_code,
+            elapsed_ms,
+            len(content),
+            str(resp.url or target_url),
+        )
+        return html, str(resp.url or target_url)
+
+    except Exception as e:
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        logger.warning(
+            "[搜索网络] [%s] HTTP 请求失败: %s (耗时 %dms, 目标URL: %s)",
+            src_label,
+            e,
+            elapsed_ms,
+            target_url,
+        )
+        raise
 
 
 def normalize_extract_rule(rule: str, default: str) -> str:
@@ -847,9 +954,28 @@ def extract_value(el: Tag | None, rule: str, base_url: str) -> str:
     return val.strip()
 
 
-def crawl_search(html: str, rule: SearchRule | None, base_url: str) -> list[dict]:
+def crawl_search(
+    html: str,
+    rule: SearchRule | None,
+    base_url: str,
+    source_name: str = "",
+    source_id: int | str = "",
+) -> list[dict]:
+    src_label = f"{source_name} (ID:{source_id})" if (source_name or source_id) else "搜索解析"
     if rule is None or not rule.selector:
+        logger.warning("[搜索解析] [%s] 缺少有效的搜索列表选择器 (rule.selector 为空)", src_label)
         return []
+
+    t0 = time.perf_counter()
+    logger.info(
+        "[搜索解析] [%s] 开始解析搜索结果 (列表选择器: 「%s」, 书名规则: 「%s」, 作者规则: 「%s」, 链接规则: 「%s」)",
+        src_label,
+        rule.selector,
+        rule.name or "text",
+        rule.author or "无",
+        rule.book_url or "a@href",
+    )
+
     try:
         soup = BeautifulSoup(html, "lxml")
     except Exception:
@@ -857,26 +983,80 @@ def crawl_search(html: str, rule: SearchRule | None, base_url: str) -> list[dict
     items: list[dict] = []
     book_url_rule = normalize_extract_rule(rule.book_url, "a@href")
     root = soup if isinstance(soup, Tag) else soup
-    for s in safe_select(root, rule.selector):
+
+    elements = safe_select(root, rule.selector)
+    if not elements:
+        logger.warning(
+            "[搜索解析] [%s] 选择器「%s」未匹配到任何书籍节点 (HTML大小: %d 字符)，请检查书源规则或网页结构",
+            src_label,
+            rule.selector,
+            len(html),
+        )
+        return []
+
+    logger.info("[搜索解析] [%s] 选择器「%s」共匹配到 %d 个候选条目", src_label, rule.selector, len(elements))
+
+    extract_fails = 0
+    for s in elements:
         try:
+            name = extract_value(s, _or_default(rule.name, "text"), base_url).strip()
+            author = extract_value(s, rule.author, base_url).strip()
+            cover = extract_value(s, rule.cover, base_url).strip()
+            intro = extract_value(s, rule.intro, base_url).strip()
+            burl = extract_value(s, book_url_rule, base_url).strip()
+            if not name and not burl:
+                extract_fails += 1
+                continue
             items.append(
                 {
-                    "name": extract_value(s, _or_default(rule.name, "text"), base_url),
-                    "author": extract_value(s, rule.author, base_url),
-                    "cover": extract_value(s, rule.cover, base_url),
-                    "intro": extract_value(s, rule.intro, base_url),
-                    "bookUrl": extract_value(s, book_url_rule, base_url),
+                    "name": name,
+                    "author": author,
+                    "cover": cover,
+                    "intro": intro,
+                    "bookUrl": burl,
                 }
             )
         except Exception:
+            extract_fails += 1
             continue
+
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    samples = [f"《{b['name']}》({b['author'] or '未知作者'})" for b in items[:3]]
+    sample_str = ", ".join(samples) + (" 等" if len(items) > 3 else "")
+    logger.info(
+        "[搜索解析] [%s] 搜索结果提取完成: 共成功解析出 %d 本书籍 (耗时 %dms%s)%s",
+        src_label,
+        len(items),
+        elapsed_ms,
+        f", 忽略无效条目 {extract_fails} 个" if extract_fails else "",
+        f": {sample_str}" if items else "",
+    )
     return items
 
 
-def crawl_detail(html: str, rule: DetailRule | None, base_url: str) -> DetailRule:
+def crawl_detail(
+    html: str,
+    rule: DetailRule | None,
+    base_url: str,
+    source_name: str = "",
+    source_id: int | str = "",
+    book_name: str = "",
+) -> DetailRule:
     out = DetailRule()
     if rule is None:
         return out
+    src_label = f"{source_name} (ID:{source_id})" if (source_name or source_id) else "详情解析"
+    book_label = f"《{book_name}》" if book_name else "书籍"
+
+    t0 = time.perf_counter()
+    logger.info(
+        "[书籍详情] [%s] 开始解析%s详情 (简介规则: 「%s」, 作者规则: 「%s」, 封面规则: 「%s」)",
+        src_label,
+        book_label,
+        rule.intro or "无",
+        rule.author or "无",
+        rule.cover or "无",
+    )
     try:
         soup = BeautifulSoup(html, "lxml")
     except Exception:
@@ -890,12 +1070,75 @@ def crawl_detail(html: str, rule: DetailRule | None, base_url: str) -> DetailRul
         out.author = extract_value(body, rule.author, base_url)
     if rule.cover:
         out.cover = extract_value(body, rule.cover, base_url)
+
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    intro_preview = (out.intro[:40] + "...") if len(out.intro) > 40 else out.intro
+    logger.info(
+        "[书籍详情] [%s] %s详情解析完成: 作者:「%s」, 封面:「%s」, 简介:「%s」 (耗时 %dms)",
+        src_label,
+        book_label,
+        out.author or "未提取",
+        out.cover or "未提取",
+        intro_preview or "未提取",
+        elapsed_ms,
+    )
     return out
 
 
-def crawl_toc(html: str, rule: TocRule | None, base_url: str) -> list[dict]:
+_INVALID_CHAPTER_PATTERNS = re.compile(
+    r"^(查看全部章节|查看完整目录|查看目录|全部章节|全部目录|完整目录|所有章节|最新章节|作品相关|正文卷|展开全部|展开|收起|下一页|上一页|返回书页|加入书架|加书签|投推荐票|投月票|打赏|倒序|正序|目录)[>\s\-_~]*$",
+    re.IGNORECASE,
+)
+
+
+def _is_invalid_chapter_title(title: str) -> bool:
+    t = (title or "").strip()
+    if not t:
+        return True
+    return bool(_INVALID_CHAPTER_PATTERNS.match(t))
+
+
+def _find_catalog_link_in_html(html: str, base_url: str) -> str:
+    """在详情页 HTML 中自动寻找通往全量目录列表的链接（如“查看全部章节 >>”）。"""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception:
+        return ""
+    for a in soup.find_all("a"):
+        txt = a.get_text(strip=True)
+        href = a.get("href", "")
+        if href and _is_invalid_chapter_title(txt) and any(k in txt for k in ["查看全部章节", "查看目录", "全部章节", "完整目录", "全部目录", "所有章节"]):
+            full_url = urllib.parse.urljoin(base_url, href)
+            if full_url != base_url:
+                return full_url
+    return ""
+
+
+def crawl_toc(
+    html: str,
+    rule: TocRule | None,
+    base_url: str,
+    source_name: str = "",
+    source_id: int | str = "",
+    book_name: str = "",
+) -> list[dict]:
+    src_label = f"{source_name} (ID:{source_id})" if (source_name or source_id) else "目录解析"
+    book_label = f"《{book_name}》" if book_name else "书籍"
+
     if rule is None or not rule.selector:
+        logger.warning("[目录解析] [%s] %s缺少目录列表选择器 (rule.toc.selector 为空)", src_label, book_label)
         return []
+
+    t0 = time.perf_counter()
+    logger.info(
+        "[目录解析] [%s] 开始解析%s目录 (列表选择器: 「%s」, 标题规则: 「%s」, 章节链接: 「%s」)",
+        src_label,
+        book_label,
+        rule.selector,
+        rule.title or "text",
+        rule.chapter_url or "@href",
+    )
+
     try:
         soup = BeautifulSoup(html, "lxml")
     except Exception:
@@ -903,40 +1146,207 @@ def crawl_toc(html: str, rule: TocRule | None, base_url: str) -> list[dict]:
     out: list[dict] = []
     seen = set()
     root = soup if isinstance(soup, Tag) else soup
-    for s in safe_select(root, rule.selector):
-        title = extract_value(s, _or_default(rule.title, "text"), base_url).strip()
-        url = extract_value(
-            s, normalize_extract_rule(rule.chapter_url, "@href"), base_url
-        ).strip()
+
+    elements = safe_select(root, rule.selector)
+    if not elements:
+        logger.warning(
+            "[目录解析] [%s] %s目录选择器「%s」未匹配到任何章节节点 (页面大小: %d 字符)，请检查书源目录规则或反爬拦截",
+            src_label,
+            book_label,
+            rule.selector,
+            len(html),
+        )
+        return []
+
+    logger.info("[目录解析] [%s] %s目录选择器「%s」共匹配到 %d 个原始节点", src_label, book_label, rule.selector, len(elements))
+
+    duplicate_count = 0
+    empty_count = 0
+    title_rule = _or_default(rule.title, "text")
+    chapter_url_rule = normalize_extract_rule(rule.chapter_url, "@href")
+
+    for s in elements:
+        title = extract_value(s, title_rule, base_url).strip()
+        url = extract_value(s, chapter_url_rule, base_url).strip()
         if not title and not url:
+            empty_count += 1
+            continue
+        if _is_invalid_chapter_title(title):
+            empty_count += 1
             continue
         key = url if url else title
         if key in seen:
+            duplicate_count += 1
             continue
         seen.add(key)
-        out.append({"title": title, "chapterUrl": url})
+        out.append({"title": title or "未知章节", "chapterUrl": url})
+
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    first_title = out[0]["title"] if out else "无"
+    last_title = out[-1]["title"] if out else "无"
+
+    logger.info(
+        "[目录解析] [%s] %s目录解析完成: 共提取 %d 个有效章节 (去重 %d 个, 过滤无效 %d 个, 耗时 %dms) [首章:「%s」, 末章:「%s」]",
+        src_label,
+        book_label,
+        len(out),
+        duplicate_count,
+        empty_count,
+        elapsed_ms,
+        first_title,
+        last_title,
+    )
     return out
 
 
-def crawl_content(html: str, rule: ContentRule | None) -> str:
+def fetch_all_toc(
+    initial_url: str,
+    rule: TocRule,
+    source_name: str = "",
+    source_id: int | str = "",
+    book_name: str = "",
+    initial_html: str | None = None,
+    max_pages: int = 50,
+) -> list[dict]:
+    """抓取目录，支持分页跟进（下一页 / nextTocUrl）并汇聚完整章节列表。"""
+    cur_url = initial_url
+    cur_html = initial_html
+    all_chapters: list[dict] = []
+    seen_keys: set[str] = set()
+    visited_pages: set[str] = set()
+    page = 0
+
+    while cur_url and cur_url not in visited_pages and page < max_pages:
+        visited_pages.add(cur_url)
+        page += 1
+        if cur_html is None:
+            try:
+                cur_html = fetch_url(cur_url, context=f"目录第{page}页:{book_name}")
+            except Exception as e:
+                logger.warning("[目录分页] [%s] 《%s》抓取目录第 %d 页失败 (%s): %s", source_name, book_name, page, cur_url, e)
+                break
+
+        page_chapters = crawl_toc(
+            cur_html,
+            rule,
+            cur_url,
+            source_name=source_name,
+            source_id=source_id,
+            book_name=book_name,
+        )
+
+        for c in page_chapters:
+            key = c.get("chapterUrl") or c.get("title") or ""
+            if key and key not in seen_keys:
+                seen_keys.add(key)
+                all_chapters.append(c)
+
+        # 查找下一页链接
+        next_url = ""
+        try:
+            soup = BeautifulSoup(cur_html, "html.parser")
+            for a in soup.find_all("a"):
+                txt = a.get_text(strip=True)
+                href = a.get("href", "")
+                if href and (txt in ["下一页", "下一章列表", "下页", "下一部", "后页"] or (txt.startswith("下一") and "章" not in txt)):
+                    full_next = urllib.parse.urljoin(cur_url, href)
+                    if full_next not in visited_pages:
+                        next_url = full_next
+                        break
+        except Exception:
+            pass
+
+        cur_url = next_url
+        cur_html = None
+
+    return all_chapters
+
+
+def crawl_content(
+    html: str,
+    rule: ContentRule | None,
+    source_name: str = "",
+    source_id: int | str = "",
+    book_name: str = "",
+    chapter_title: str = "",
+) -> str:
+    src_label = f"{source_name} (ID:{source_id})" if (source_name or source_id) else "正文解析"
+    title_label = f"《{book_name}》-「{chapter_title}」" if (book_name or chapter_title) else "章节正文"
+
     if rule is None:
+        logger.warning("[正文解析] [%s] %s未配置正文规则，返回原始 HTML", src_label, title_label)
         return html
+
+    t0 = time.perf_counter()
     try:
         soup = BeautifulSoup(html, "lxml")
     except Exception:
         soup = BeautifulSoup(html, "html.parser")
+
     if not rule.selector:
-        return soup.get_text(separator="\n", strip=True)
+        logger.info("[正文解析] [%s] %s正文选择器为空，回退使用全文纯文本提取", src_label, title_label)
+        text = soup.get_text(separator="\n", strip=True)
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        logger.info(
+            "[正文解析] [%s] 全文纯文本提取完成: 共 %d 字符 (耗时 %dms)",
+            src_label,
+            len(text),
+            elapsed_ms,
+        )
+        return text
+
+    logger.info(
+        "[正文解析] [%s] 开始解析%s (选择器: 「%s」, 提取规则: 「%s」)",
+        src_label,
+        title_label,
+        rule.selector,
+        rule.text or "text",
+    )
+
     root = soup if isinstance(soup, Tag) else soup
     elems = safe_select(root, rule.selector)
     if not elems:
+        logger.warning(
+            "[正文解析] [%s] %s正文选择器「%s」未能匹配到任何内容节点 (HTML 大小: %d 字符)，请检查正文规则或防爬拦截",
+            src_label,
+            title_label,
+            rule.selector,
+            len(html),
+        )
         return ""
+
+    logger.info("[正文解析] [%s] %s正文选择器「%s」匹配到 %d 个段落节点", src_label, title_label, rule.selector, len(elems))
+
     paragraphs = []
+    text_rule = _or_default(rule.text, "text")
     for el in elems:
-        p_text = extract_value(el, _or_default(rule.text, "text"), "")
+        p_text = extract_value(el, text_rule, "")
         if p_text:
             paragraphs.append(p_text)
-    return "\n".join(paragraphs)
+
+    content = "\n".join(paragraphs)
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    preview = (content[:50].replace("\n", " ") + "...") if len(content) > 50 else content.replace("\n", " ")
+
+    logger.info(
+        "[正文解析] [%s] %s正文提取成功: 共 %d 个段落, 总计 %d 字符 (耗时 %dms) [预览: 「%s」]",
+        src_label,
+        title_label,
+        len(paragraphs),
+        len(content),
+        elapsed_ms,
+        preview if preview else "无内容",
+    )
+
+    if len(content) < 50:
+        logger.warning(
+            "[正文解析] [%s] %s提取的正文较短 (仅 %d 字符)，请确认是否遭遇反爬、分页或规则需优化",
+            src_label,
+            title_label,
+            len(content),
+        )
+
+    return content
 
 
 def source_by_id(sid: int) -> dict | None:
@@ -955,57 +1365,174 @@ def _rule_for_source(src: dict) -> SourceRule:
     return rule
 
 
-def _toc_url(book: dict, rule: SourceRule) -> str:
-    raw = (rule.toc.url if rule.toc else "") or ""
+def _resolve_toc_url(book: dict, rule: SourceRule, book_name: str = "") -> tuple[str, str | None]:
+    """
+    解析真实目录 URL。
+    返回 (real_toc_url, detail_html_if_fetched)
+    只有当 real_toc_url == book_url 时，detail_html 才可以复用为目录 HTML。
+    """
     book_url = book.get("source_url") or ""
+    raw = (rule.toc.url if rule.toc else "") or ""
     if raw:
         raw = raw.replace("{{bookUrl}}", book_url).replace("{bookUrl}", book_url)
         if raw.startswith("http://") or raw.startswith("https://"):
-            return raw
-    return book_url
+            return raw, None
+        if raw.startswith("/") and "@" not in raw and not any(c in raw for c in ["*", "[", ">", ":", "."]):
+            return urllib.parse.urljoin(book_url, raw), None
+
+        # raw 是选择器规则，先抓取详情页 HTML
+        try:
+            detail_html = fetch_url(book_url, context=f"详情页TOC解析:{book_name}")
+            soup = BeautifulSoup(detail_html, "html.parser")
+            extracted = extract_value(soup, raw, book_url)
+            if extracted and extracted != book_url:
+                return urllib.parse.urljoin(book_url, extracted), None
+            # 自动发现“查看全部章节”
+            auto_toc = _find_catalog_link_in_html(detail_html, book_url)
+            if auto_toc and auto_toc != book_url:
+                return auto_toc, None
+            return book_url, detail_html
+        except Exception:
+            return book_url, None
+
+    # raw 为空，在详情页寻找是否存在“查看全部章节”
+    try:
+        detail_html = fetch_url(book_url, context=f"详情页:{book_name}")
+        auto_toc = _find_catalog_link_in_html(detail_html, book_url)
+        if auto_toc and auto_toc != book_url:
+            return auto_toc, None
+        return book_url, detail_html
+    except Exception:
+        return book_url, None
+
+
+def _toc_url(book: dict, rule: SourceRule) -> str:
+    url, _ = _resolve_toc_url(book, rule, book.get("name") or "")
+    return url
 
 
 def refresh_web_chapters(book: dict) -> None:
-    src = source_by_id(int(book.get("source_id") or 0))
+    book_id = book.get("id") or 0
+    book_name = book.get("name") or "未知书籍"
+    src_id = int(book.get("source_id") or 0)
+    src = source_by_id(src_id)
     if not src:
+        logger.error("[目录抓取] 书籍《%s》(ID:%s) 绑定的书源 (ID:%s) 不存在", book_name, book_id, src_id)
         raise ValueError("无书源")
+
     rule = _rule_for_source(src)
     if rule.toc is None or not rule.toc.selector:
+        logger.warning("[目录抓取] [%s (ID:%s)] 书籍《%s》的书源无有效目录规则", src["name"], src["id"], book_name)
         raise ValueError("无目录规则")
-    toc_url = _toc_url(book, rule)
+
+    toc_url, initial_html = _resolve_toc_url(book, rule, book_name=book_name)
     if not toc_url:
+        logger.warning("[目录抓取] [%s (ID:%s)] 书籍《%s》缺少目录请求地址", src["name"], src["id"], book_name)
         raise ValueError("缺少书籍地址")
-    html = fetch_url(toc_url)
-    toc = crawl_toc(html, rule.toc, toc_url)
+
+    logger.info("[目录抓取] [%s (ID:%s)] 开始为《%s》(ID:%s) 抓取目录 -> %s", src["name"], src["id"], book_name, book_id, toc_url)
+    t0 = time.perf_counter()
+    try:
+        toc = fetch_all_toc(
+            toc_url,
+            rule.toc,
+            source_name=src["name"],
+            source_id=src["id"],
+            book_name=book_name,
+            initial_html=initial_html,
+        )
+    except Exception as e:
+        logger.error("[目录抓取] [%s (ID:%s)] 《%s》(ID:%s) 目录抓取失败: %s (URL: %s)", src["name"], src["id"], book_name, book_id, e, toc_url)
+        raise
+
     if not toc:
+        logger.warning("[目录抓取] [%s (ID:%s)] 《%s》(ID:%s) 未解析出任何有效章节，跳过数据库更新", src["name"], src["id"], book_name, book_id)
         return
+
+    db_t0 = time.perf_counter()
     conn = require_db()
-    conn.execute("DELETE FROM chapter WHERE book_id=?", (book["id"],))
+    conn.execute("DELETE FROM chapter WHERE book_id=?", (book_id,))
     conn.executemany(
         "INSERT INTO chapter (book_id, title, idx, content_url) VALUES (?, ?, ?, ?)",
-        [(book["id"], c["title"], i, c["chapterUrl"]) for i, c in enumerate(toc)],
+        [(book_id, c["title"], i, c["chapterUrl"]) for i, c in enumerate(toc)],
     )
     conn.commit()
+    db_elapsed_ms = int((time.perf_counter() - db_t0) * 1000)
+    total_elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    logger.info(
+        "[目录入库] 《%s》(ID:%s) 成功写入 %d 个章节至数据库 (写入耗时 %dms, 整体耗时 %dms)",
+        book_name,
+        book_id,
+        len(toc),
+        db_elapsed_ms,
+        total_elapsed_ms,
+    )
 
 
-def fetch_web_chapter(book: dict, chapter_url: str) -> str:
-    src = source_by_id(int(book.get("source_id") or 0))
+def fetch_web_chapter(book: dict, chapter_url: str, chapter_title: str = "") -> str:
+    book_id = book.get("id") or 0
+    book_name = book.get("name") or "未知书籍"
+    src_id = int(book.get("source_id") or 0)
+    src = source_by_id(src_id)
     if not src:
+        logger.error("[正文抓取] 书籍《%s》(ID:%s) 绑定的书源 (ID:%s) 不存在", book_name, book_id, src_id)
         raise ValueError("无书源")
+
     rule = _rule_for_source(src)
     if rule.content is None:
+        logger.warning("[正文抓取] [%s (ID:%s)] 书籍《%s》无有效正文规则", src["name"], src["id"], book_name)
         raise ValueError("无内容规则")
+
     target = chapter_url or book.get("source_url") or ""
-    html = fetch_url(target)
-    return crawl_content(html, rule.content)
+    if not target:
+        logger.warning("[正文抓取] [%s (ID:%s)] 《%s》缺失章节地址", src["name"], src["id"], book_name)
+        raise ValueError("缺少章节地址")
+
+    t_label = f"「{chapter_title}」" if chapter_title else ""
+    logger.info("[正文抓取] [%s (ID:%s)] 开始抓取《%s》%s正文 -> %s", src["name"], src["id"], book_name, t_label, target)
+    try:
+        html = fetch_url(target, context=f"正文页:{book_name}{t_label}")
+        return crawl_content(
+            html,
+            rule.content,
+            source_name=src["name"],
+            source_id=src["id"],
+            book_name=book_name,
+            chapter_title=chapter_title,
+        )
+    except Exception as e:
+        logger.error(
+            "[正文抓取] [%s (ID:%s)] 《%s》%s正文抓取失败: %s (URL: %s)",
+            src["name"],
+            src["id"],
+            book_name,
+            t_label,
+            e,
+            target,
+        )
+        raise
 
 
 def crawl_book_detail(book: dict) -> DetailRule:
-    src = source_by_id(int(book.get("source_id") or 0))
+    book_id = book.get("id") or 0
+    book_name = book.get("name") or "未知书籍"
+    src_id = int(book.get("source_id") or 0)
+    src = source_by_id(src_id)
     if not src:
+        logger.error("[书籍详情] 书籍《%s》(ID:%s) 绑定的书源 (ID:%s) 不存在", book_name, book_id, src_id)
         raise ValueError("无书源")
     rule = _rule_for_source(src)
     if rule.detail is None:
+        logger.warning("[书籍详情] [%s (ID:%s)] 书籍《%s》无详情规则", src["name"], src["id"], book_name)
         raise ValueError("无详情规则")
-    html = fetch_url(book.get("source_url") or "")
-    return crawl_detail(html, rule.detail, book.get("source_url") or "")
+    target_url = book.get("source_url") or ""
+    logger.info("[书籍详情] [%s (ID:%s)] 开始抓取《%s》(ID:%s) 详情页 -> %s", src["name"], src["id"], book_name, book_id, target_url)
+    html = fetch_url(target_url, context=f"详情页:{book_name}")
+    return crawl_detail(
+        html,
+        rule.detail,
+        target_url,
+        source_name=src["name"],
+        source_id=src["id"],
+        book_name=book_name,
+    )
