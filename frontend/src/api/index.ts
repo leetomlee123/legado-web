@@ -79,10 +79,11 @@ export async function listChapters(identifier: number | string): Promise<Chapter
 // 获取章节内容
 export async function getChapterContent(
   identifier: number | string,
-  cid: number
-): Promise<{ content: string }> {
-  const res = await http.get(`/books/${identifier}/chapters/${cid}/content`)
-  return res as unknown as { content: string }
+  cid: number,
+  params?: { refresh?: boolean }
+): Promise<{ content: string; contentUrl?: string; title?: string }> {
+  const res = await http.get(`/books/${identifier}/chapters/${cid}/content`, { params })
+  return res as unknown as { content: string; contentUrl?: string; title?: string }
 }
 
 // 预初始化书籍（通过 UUID 注册为非书架或书架书籍）
@@ -308,11 +309,20 @@ export function searchStream(
 // 设置
 export interface AppSettings {
   proxy: string
+  proxy_enabled?: boolean
+  proxyEnabled?: boolean
+  m_to_www?: boolean
+  mToWww?: boolean
+  convertMToWww?: boolean
   timeout?: number
   max_workers?: number
+  maxWorkers?: number
   health_check_enabled?: boolean
+  healthCheckEnabled?: boolean
   health_check_interval?: number
+  healthCheckInterval?: number
   auto_disable_dead?: boolean
+  autoDisableDead?: boolean
 }
 
 export async function getSettings(): Promise<AppSettings> {

@@ -8,7 +8,8 @@ from pathlib import Path
 from db import require_db
 
 TITLE_RE = re.compile(
-    r"(?s)\s*(第\s*[0-9零一二三四五六七八九十百千万两]+\s*[章节回卷集部篇]|第一卷|序章|楔子|正文|番外|完结感言)[^\n]{0,30}\s*"
+    r"^[ \t]*(第\s*[0-9零一二三四五六七八九十百千万两a-zA-Z]+\s*[章节回卷集部篇]|第\s*[0-9零一二三四五六七八九十百千万两a-zA-Z]+\s*话|卷\s*[0-9零一二三四五六七八九十百千万两]+|Chapter\s*\d+|序章|楔子|番外(?:篇)?|完结感言|正文卷|\b正文(?:\s+[^\n]+)?$)[^\n]{0,50}",
+    re.MULTILINE | re.IGNORECASE,
 )
 
 

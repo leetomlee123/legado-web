@@ -37,6 +37,7 @@ export interface Chapter {
   bookId: number
   title: string
   index: number
+  contentUrl?: string
 }
 
 export interface ImportResult {

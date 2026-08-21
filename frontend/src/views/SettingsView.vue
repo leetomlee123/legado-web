@@ -174,21 +174,39 @@
     <!-- ── 网络代理配置 ──────────────────────────────────── -->
     <div class="settings-card">
       <div class="card-header">
-        <div class="card-icon" aria-hidden="true">
+        <div class="card-icon" :style="proxyEnabled ? 'background: rgba(39, 201, 63, 0.15); color: #27c93f;' : ''" aria-hidden="true">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="10"/>
             <line x1="2" y1="12" x2="22" y2="12"/>
             <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
           </svg>
         </div>
-        <div>
-          <div class="card-title">网络代理</div>
-          <p class="card-desc">用于搜索和抓取的外部 HTTP/SOCKS 代理，留空表示直连。</p>
+        <div style="flex: 1;">
+          <div class="card-title-row">
+            <div class="card-title">网络代理</div>
+            <el-tag size="small" :type="proxyEnabled ? 'success' : 'info'">
+              {{ proxyEnabled ? '🟢 代理通道已开启' : '⚪ 直连模式 (代理已关闭)' }}
+            </el-tag>
+          </div>
+          <p class="card-desc">用于全网搜索、正文抓取及订阅更新的外部 HTTP/SOCKS 代理通道。</p>
         </div>
       </div>
 
+      <!-- 代理总开关 -->
+      <div class="field-group-inline">
+        <div>
+          <div class="field-label">启用网络代理</div>
+          <span class="field-hint">开启后所有书源网络请求将经由此代理通道发出；关闭则完全直连。</span>
+        </div>
+        <el-switch v-model="proxyEnabled" />
+      </div>
+
       <div class="field-group">
-        <label for="proxy-input" class="field-label">代理地址</label>
+        <div class="field-title-row">
+          <label for="proxy-input" class="field-label">代理服务器地址</label>
+          <span v-if="proxyEnabled && proxy.trim()" class="field-tag">代理生效中</span>
+          <span v-else-if="!proxyEnabled && proxy.trim()" class="field-tag" style="opacity: 0.7;">已配置 (未激活)</span>
+        </div>
         <div class="proxy-input-group">
           <input
             id="proxy-input"
@@ -229,6 +247,35 @@
             </div>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- ── 域名自动转换 (m. -> www.) ───────────────────────── -->
+    <div class="settings-card">
+      <div class="card-header">
+        <div class="card-icon" :style="mToWww ? 'background: rgba(39, 201, 63, 0.15); color: #27c93f;' : ''" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+          </svg>
+        </div>
+        <div style="flex: 1;">
+          <div class="card-title-row">
+            <div class="card-title">域名自动转换 (m. → www.)</div>
+            <el-tag size="small" :type="mToWww ? 'success' : 'info'">
+              {{ mToWww ? '🟢 已启用 (自动将 m. 转换为 www.)' : '⚪ 已关闭 (保持原始书源域名)' }}
+            </el-tag>
+          </div>
+          <p class="card-desc">自动将小说网站的移动端网址（如 https://m.xxx.com/）转换为桌面端网址（如 https://www.xxx.com/）。</p>
+        </div>
+      </div>
+
+      <div class="field-group-inline">
+        <div>
+          <div class="field-label">启用移动端转桌面端 (m. → www.)</div>
+          <span class="field-hint">开启后，全网搜索、目录抓取、正文解析及外链打开时将自动重写 <code>m.</code> 网址为 <code>www.</code>，获取更完整通畅的电脑端小说正文排版。</span>
+        </div>
+        <el-switch v-model="mToWww" />
       </div>
     </div>
 
@@ -287,6 +334,8 @@ import {
 } from '@/api'
 
 const proxy = ref('')
+const proxyEnabled = ref(false)
+const mToWww = ref(false)
 const timeout = ref(15)
 const maxWorkers = ref(12)
 const healthCheckEnabled = ref(true)
@@ -304,11 +353,13 @@ async function loadSettings() {
   try {
     const s = await getSettings()
     proxy.value = s.proxy || ''
+    proxyEnabled.value = s.proxy_enabled ?? (s.proxyEnabled ?? Boolean(s.proxy))
+    mToWww.value = s.m_to_www ?? (s.mToWww ?? (s.convertMToWww ?? false))
     timeout.value = s.timeout ?? 15
-    maxWorkers.value = s.max_workers ?? 12
-    healthCheckEnabled.value = s.health_check_enabled ?? true
-    healthCheckInterval.value = s.health_check_interval ?? 6
-    autoDisableDead.value = s.auto_disable_dead ?? false
+    maxWorkers.value = s.max_workers ?? (s.maxWorkers ?? 12)
+    healthCheckEnabled.value = s.health_check_enabled ?? (s.healthCheckEnabled ?? true)
+    healthCheckInterval.value = s.health_check_interval ?? (s.healthCheckInterval ?? 6)
+    autoDisableDead.value = s.auto_disable_dead ?? (s.autoDisableDead ?? false)
   } catch (e: any) {
     ElMessage.error(e.message || '加载配置失败')
   }
@@ -370,6 +421,8 @@ async function handleTestProxy() {
 }
 
 function resetDefaults() {
+  proxyEnabled.value = false
+  mToWww.value = false
   timeout.value = 15
   maxWorkers.value = 12
   healthCheckEnabled.value = true
@@ -383,6 +436,10 @@ async function save() {
   try {
     await saveSettings({
       proxy: proxy.value.trim(),
+      proxy_enabled: proxyEnabled.value,
+      proxyEnabled: proxyEnabled.value,
+      m_to_www: mToWww.value,
+      mToWww: mToWww.value,
       timeout: timeout.value,
       max_workers: maxWorkers.value,
       health_check_enabled: healthCheckEnabled.value,

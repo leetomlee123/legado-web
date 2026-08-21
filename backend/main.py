@@ -418,10 +418,20 @@ def list_chapters(identifier: str):
         logger.info("[目录加载] 《%s》(ID:%s) 从本地数据库加载章节列表: 共 %d 章", book_name, book_id, existing_count)
 
     rows = conn.execute(
-        "SELECT id, book_id, title, idx FROM chapter WHERE book_id=? ORDER BY idx",
+        "SELECT id, book_id, title, idx, content_url FROM chapter WHERE book_id=? ORDER BY idx",
         (book_id,),
     ).fetchall()
-    out = [{"id": r["id"], "bookId": r["book_id"], "title": r["title"], "index": r["idx"]} for r in rows]
+    from settings import normalize_source_url
+    out = [
+        {
+            "id": r["id"],
+            "bookId": r["book_id"],
+            "title": r["title"],
+            "index": r["idx"],
+            "contentUrl": normalize_source_url(r["content_url"] or ""),
+        }
+        for r in rows
+    ]
     return jsonify(out)
 
 
@@ -439,20 +449,23 @@ def get_chapter_content(identifier: str, cid: int):
     ).fetchone()
     if row is None:
         return write_msg(404, "章节不存在")
+    from settings import normalize_source_url
     content = row["content"] or ""
-    content_url = row["content_url"] or ""
+    content_url = normalize_source_url(row["content_url"] or "")
     chapter_title = row["title"] or ""
     chapter_idx = row["idx"] if "idx" in row.keys() else 0
 
-    if not content.strip() and content_url:
+    refresh = request.args.get("refresh") in ("1", "true", "True")
+    if (not content.strip() or refresh) and content_url:
         if (b["source_type"] or "") == "web":
             logger.info(
-                "[正文读取] 《%s》(ID:%s) 第 %d 章「%s」(CID:%s) 无正文缓存，开始从网络抓取...",
+                "[正文读取] 《%s》(ID:%s) 第 %d 章「%s」(CID:%s) %s，开始从网络抓取...",
                 book_name,
                 book_id,
                 chapter_idx,
                 chapter_title,
                 cid,
+                "强制刷新正文" if refresh else "无正文缓存",
             )
             t0 = time.perf_counter()
             try:
@@ -491,7 +504,7 @@ def get_chapter_content(identifier: str, cid: int):
             cid,
             len(content),
         )
-    return jsonify({"content": content})
+    return jsonify({"content": content, "contentUrl": content_url, "title": chapter_title})
 
 
 @app.get("/api/books/<identifier>/progress")
@@ -1166,7 +1179,9 @@ def get_source_presets():
 @app.get("/api/settings")
 def get_settings():
     from settings import (
-        get_proxy,
+        get_raw_proxy,
+        get_proxy_enabled,
+        get_m_to_www,
         get_timeout,
         get_max_workers,
         get_health_check_enabled,
@@ -1174,20 +1189,34 @@ def get_settings():
         get_auto_disable_dead,
     )
     return jsonify({
-        "proxy": get_proxy(),
+        "proxy": get_raw_proxy(),
+        "proxyEnabled": get_proxy_enabled(),
+        "proxy_enabled": get_proxy_enabled(),
+        "m_to_www": get_m_to_www(),
+        "mToWww": get_m_to_www(),
+        "convertMToWww": get_m_to_www(),
         "timeout": get_timeout(),
         "max_workers": get_max_workers(),
+        "maxWorkers": get_max_workers(),
         "health_check_enabled": get_health_check_enabled(),
+        "healthCheckEnabled": get_health_check_enabled(),
         "health_check_interval": get_health_check_interval(),
+        "healthCheckInterval": get_health_check_interval(),
         "auto_disable_dead": get_auto_disable_dead(),
+        "autoDisableDead": get_auto_disable_dead(),
     })
 
 
 @app.post("/api/settings")
 def update_settings():
     from settings import (
+        get_raw_proxy,
         get_proxy,
         set_proxy,
+        get_proxy_enabled,
+        set_proxy_enabled,
+        get_m_to_www,
+        set_m_to_www,
         get_timeout,
         set_timeout,
         get_max_workers,
@@ -1202,6 +1231,16 @@ def update_settings():
     body = request.get_json(silent=True) or {}
     if "proxy" in body:
         set_proxy(str(body.get("proxy") or "").strip())
+    if "proxy_enabled" in body or "proxyEnabled" in body:
+        pe = body.get("proxy_enabled") if "proxy_enabled" in body else body.get("proxyEnabled")
+        set_proxy_enabled(pe)
+    if "m_to_www" in body or "mToWww" in body or "convertMToWww" in body:
+        mw = (
+            body.get("m_to_www")
+            if "m_to_www" in body
+            else (body.get("mToWww") if "mToWww" in body else body.get("convertMToWww"))
+        )
+        set_m_to_www(mw)
     if "timeout" in body:
         set_timeout(body.get("timeout"))
     if "max_workers" in body or "maxWorkers" in body:
@@ -1213,16 +1252,25 @@ def update_settings():
     if "auto_disable_dead" in body or "autoDisableDead" in body:
         set_auto_disable_dead(body.get("auto_disable_dead") if "auto_disable_dead" in body else body.get("autoDisableDead"))
 
-    logger.info("系统设置已更新: proxy=%s, timeout=%s, max_workers=%s, health_check=%s(%sh), auto_disable_dead=%s",
-        get_proxy(), get_timeout(), get_max_workers(), get_health_check_enabled(), get_health_check_interval(), get_auto_disable_dead())
+    logger.info("系统设置已更新: proxy=%s (enabled=%s), m_to_www=%s, timeout=%s, max_workers=%s, health_check=%s(%sh), auto_disable_dead=%s",
+        get_raw_proxy(), get_proxy_enabled(), get_m_to_www(), get_timeout(), get_max_workers(), get_health_check_enabled(), get_health_check_interval(), get_auto_disable_dead())
     return jsonify({
         "ok": True,
-        "proxy": get_proxy(),
+        "proxy": get_raw_proxy(),
+        "proxyEnabled": get_proxy_enabled(),
+        "proxy_enabled": get_proxy_enabled(),
+        "m_to_www": get_m_to_www(),
+        "mToWww": get_m_to_www(),
+        "convertMToWww": get_m_to_www(),
         "timeout": get_timeout(),
         "max_workers": get_max_workers(),
+        "maxWorkers": get_max_workers(),
         "health_check_enabled": get_health_check_enabled(),
+        "healthCheckEnabled": get_health_check_enabled(),
         "health_check_interval": get_health_check_interval(),
+        "healthCheckInterval": get_health_check_interval(),
         "auto_disable_dead": get_auto_disable_dead(),
+        "autoDisableDead": get_auto_disable_dead(),
     })
 
 

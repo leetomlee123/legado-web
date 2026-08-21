@@ -41,6 +41,23 @@
         <span class="dock-label">换源</span>
       </button>
 
+      <!-- 打开源网页链接 (新标签页) -->
+      <button
+        v-if="sourceWebUrl"
+        class="dock-item"
+        id="dock-source-link-btn"
+        title="在新标签页打开源网页"
+        aria-label="在新标签页打开源网页"
+        @click="openSourceWebpage"
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+          <polyline points="15 3 21 3 21 9"/>
+          <line x1="10" y1="14" x2="21" y2="3"/>
+        </svg>
+        <span class="dock-label">原网页</span>
+      </button>
+
       <!-- 书架/返回 -->
       <button
         class="dock-item"
@@ -155,7 +172,7 @@
             <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
           </svg>
           <p class="error-text">{{ tocError }}</p>
-          <button class="btn-qd-retry" @click="initBookAndChapters">重新解析目录</button>
+          <button class="btn-qd-retry" @click="() => initBookAndChapters()">重新解析目录</button>
         </div>
 
         <!-- 正常阅读主体内容 -->
@@ -184,6 +201,21 @@
               </svg>
               源: {{ currentBook.sourceName }}
             </span>
+            <a
+              v-if="sourceWebUrl"
+              :href="sourceWebUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="meta-item source-meta-link"
+              title="在新标签页打开源网页"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                <polyline points="15 3 21 3 21 9"/>
+                <line x1="10" y1="14" x2="21" y2="3"/>
+              </svg>
+              源网页
+            </a>
             <span v-if="content" class="meta-item">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/>
@@ -335,25 +367,43 @@
               </button>
             </div>
 
-            <!-- 目录章节列表 -->
-            <div class="qd-toc-scroll" id="qd-toc-scroll" role="list">
+            <!-- 目录章节列表（虚拟滚动，支撑万级章节瞬间加载） -->
+            <div
+              class="qd-toc-scroll"
+              id="qd-toc-scroll"
+              ref="tocScrollContainer"
+              role="list"
+              @scroll.passive="onTocScroll"
+            >
               <div v-if="filteredChapters.length === 0" class="toc-empty-filter">
                 未搜索到匹配章节
               </div>
 
-              <button
-                v-for="item in filteredChapters"
-                :key="item.id || item.originalIndex"
-                class="qd-toc-cell"
-                :class="{ active: item.originalIndex === chapterIndex }"
-                :id="`toc-cell-${item.originalIndex}`"
-                role="listitem"
-                @click="goToChapter(item.originalIndex)"
+              <!-- 虚拟滚动容器：以总高度占位，仅渲染视口范围内的章节节点 -->
+              <div
+                v-else
+                class="qd-toc-virtual-wrap"
+                :style="{ height: `${virtualToc.totalHeight}px` }"
               >
-                <span class="cell-num">{{ item.originalIndex + 1 }}</span>
-                <span class="cell-title" :title="item.title">{{ item.title }}</span>
-                <span v-if="item.originalIndex === chapterIndex" class="cell-badge">当前读到</span>
-              </button>
+                <div
+                  class="qd-toc-virtual-list"
+                  :style="{ transform: `translate3d(0, ${virtualToc.offsetY}px, 0)` }"
+                >
+                  <button
+                    v-for="item in virtualToc.items"
+                    :key="item.id || item.originalIndex"
+                    class="qd-toc-cell"
+                    :class="{ active: item.originalIndex === chapterIndex }"
+                    :id="`toc-cell-${item.originalIndex}`"
+                    role="listitem"
+                    @click="goToChapter(item.originalIndex)"
+                  >
+                    <span class="cell-num">{{ item.originalIndex + 1 }}</span>
+                    <span class="cell-title" :title="item.title">{{ item.title }}</span>
+                    <span v-if="item.originalIndex === chapterIndex" class="cell-badge">当前读到</span>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -633,6 +683,30 @@ const showSettings = ref(false)
 const tocKeyword = ref('')
 const isReverseOrder = ref(false)
 
+const currentChapter = computed<Chapter | undefined>(() => chapters.value[chapterIndex.value])
+
+const sourceWebUrl = computed(() => {
+  // 1. 优先当前章节的具体网页 URL
+  const chUrl = currentChapter.value?.contentUrl || ''
+  if (chUrl && (chUrl.startsWith('http://') || chUrl.startsWith('https://'))) {
+    return chUrl
+  }
+  // 2. 其次书籍详情/目录页 URL
+  const bookUrl = currentBook.value?.source_url || currentBook.value?.sourceUrl || currentBook.value?.bookUrl || ''
+  if (bookUrl && (bookUrl.startsWith('http://') || bookUrl.startsWith('https://'))) {
+    return bookUrl
+  }
+  return ''
+})
+
+function openSourceWebpage() {
+  if (sourceWebUrl.value) {
+    window.open(sourceWebUrl.value, '_blank', 'noopener,noreferrer')
+  } else {
+    ElMessage.info('当前章节未关联网络书源链接')
+  }
+}
+
 // ── 换源相关状态 ─────────────────────────────────────────
 interface CandidateSourceItem {
   sourceId: number
@@ -675,45 +749,111 @@ const sourceSearchResults = computed(() => {
   })
 })
 
-// 过滤与排序后的目录章节
+// 过滤与排序后的目录章节（性能优化：仅在依赖变化时计算）
 const filteredChapters = computed(() => {
   const kw = tocKeyword.value.trim().toLowerCase()
-  let list = chapters.value.map((c, originalIndex) => ({
-    ...c,
-    originalIndex,
-  }))
+  const raw = chapters.value
+  if (!raw || !raw.length) return []
 
-  if (kw) {
-    list = list.filter(
-      (c) =>
-        c.title.toLowerCase().includes(kw) ||
-        String(c.originalIndex + 1).includes(kw)
-    )
+  let list: Array<Chapter & { originalIndex: number }>
+  if (!kw) {
+    list = raw.map((c, originalIndex) => ({
+      ...c,
+      originalIndex,
+    }))
+  } else {
+    list = []
+    for (let i = 0; i < raw.length; i++) {
+      const c = raw[i]
+      if (c.title.toLowerCase().includes(kw) || String(i + 1).includes(kw)) {
+        list.push({ ...c, originalIndex: i })
+      }
+    }
   }
 
   if (isReverseOrder.value) {
-    return [...list].reverse()
+    return list.slice().reverse()
   }
   return list
 })
 
-function scrollToActiveChapter() {
-  const el = document.getElementById(`toc-cell-${chapterIndex.value}`)
-  if (el) {
-    el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+// ── 目录虚拟滚动与高性能渲染 ─────────────────────────────
+const TOC_ITEM_HEIGHT = 44
+const tocScrollTop = ref(0)
+const tocScrollContainer = ref<HTMLElement | null>(null)
+
+function onTocScroll(e: Event) {
+  const target = e.target as HTMLElement
+  if (target) {
+    tocScrollTop.value = target.scrollTop
   }
 }
 
-// 打开目录时自动定位当前阅读章节
-watch(showToc, (val) => {
-  if (val) {
-    nextTick(() => {
-      setTimeout(() => {
-        scrollToActiveChapter()
-      }, 100)
-    })
+// 关键词或排序变更时快速归位滚动条
+watch([tocKeyword, isReverseOrder], () => {
+  if (tocScrollContainer.value) {
+    tocScrollContainer.value.scrollTop = 0
+  }
+  tocScrollTop.value = 0
+})
+
+// 虚拟滚动可视窗口计算（保持 DOM 节点数恒定在 ~35 个，极大提升超大目录秒开与滑动性能）
+const virtualToc = computed(() => {
+  const list = filteredChapters.value
+  const total = list.length
+  if (total === 0) {
+    return { totalHeight: 0, offsetY: 0, items: [] }
+  }
+
+  const itemHeight = TOC_ITEM_HEIGHT
+  const containerH = tocScrollContainer.value?.clientHeight || 650
+  const buffer = 12
+
+  const startIndex = Math.max(0, Math.floor(tocScrollTop.value / itemHeight) - buffer)
+  const visibleCount = Math.ceil(containerH / itemHeight) + buffer * 2
+  const endIndex = Math.min(total, startIndex + visibleCount)
+
+  const items = list.slice(startIndex, endIndex)
+  const offsetY = startIndex * itemHeight
+  const totalHeight = total * itemHeight
+
+  return {
+    totalHeight,
+    offsetY,
+    items,
   }
 })
+
+/** 精准瞬时同步目录滚动位置至当前阅读章节，确保虚拟窗口和真实 DOM 滚动条 100% 同步 */
+function syncTocPosition() {
+  const targetIdx = filteredChapters.value.findIndex(
+    (item) => item.originalIndex === chapterIndex.value
+  )
+  const targetScrollTop = targetIdx >= 0 ? Math.max(0, targetIdx * TOC_ITEM_HEIGHT - 160) : 0
+  tocScrollTop.value = targetScrollTop
+  nextTick(() => {
+    if (tocScrollContainer.value) {
+      tocScrollContainer.value.scrollTop = targetScrollTop
+    }
+  })
+  requestAnimationFrame(() => {
+    if (tocScrollContainer.value && tocScrollContainer.value.scrollTop !== targetScrollTop) {
+      tocScrollContainer.value.scrollTop = targetScrollTop
+    }
+  })
+}
+
+// 每次打开目录时，瞬时同步滚动位置至当前阅读章节（无缓慢滚动动画、无白屏）
+watch(showToc, (val) => {
+  if (val) {
+    syncTocPosition()
+  }
+})
+
+// 用户手动点击「定位当前」按钮
+function scrollToActiveChapter() {
+  syncTocPosition()
+}
 
 // ── 计算属性 ─────────────────────────────────────────────
 const currentChapterTitle = computed(() =>
@@ -823,7 +963,7 @@ function persistProgress(index: number) {
 
 // ── 数据初始化与加载 ─────────────────────────────────────
 
-async function initBookAndChapters() {
+async function initBookAndChapters(targetIndex?: number, forceRefresh: boolean = false) {
   const idOrUuid = identifier.value
   if (!idOrUuid) {
     tocError.value = '未找到书籍标识符'
@@ -851,25 +991,29 @@ async function initBookAndChapters() {
 
     // 3. 读取历史阅读记录并恢复
     let initialIndex = 0
-    try {
-      const prog = await getReadProgress(idOrUuid)
-      if (prog && typeof prog.chapterIndex === 'number' && prog.chapterIndex >= 0 && prog.chapterIndex < list.length) {
-        initialIndex = prog.chapterIndex
-      } else {
-        const local = localStorage.getItem(`read_progress_${idOrUuid}`)
-        if (local) {
-          const parsed = JSON.parse(local)
-          if (parsed && typeof parsed.index === 'number' && parsed.index < list.length) {
-            initialIndex = parsed.index
+    if (typeof targetIndex === 'number' && targetIndex >= 0 && targetIndex < list.length) {
+      initialIndex = targetIndex
+    } else {
+      try {
+        const prog = await getReadProgress(idOrUuid)
+        if (prog && typeof prog.chapterIndex === 'number' && prog.chapterIndex >= 0 && prog.chapterIndex < list.length) {
+          initialIndex = prog.chapterIndex
+        } else {
+          const local = localStorage.getItem(`read_progress_${idOrUuid}`)
+          if (local) {
+            const parsed = JSON.parse(local)
+            if (parsed && typeof parsed.index === 'number' && parsed.index < list.length) {
+              initialIndex = parsed.index
+            }
           }
         }
+      } catch (e) {
+        console.debug('读取阅读进度失败:', e)
       }
-    } catch (e) {
-      console.debug('读取阅读进度失败:', e)
     }
 
-    // 4. 解析目标章节数据（第二阶段 Loading）
-    await loadChapterContentByIndex(initialIndex)
+    // 4. 解析目标章节数据（第二阶段 Loading，强制重新请求正文）
+    await loadChapterContentByIndex(initialIndex, forceRefresh)
   } catch (e: any) {
     loadingToc.value = false
     tocError.value = e.message || '章节列表解析失败'
@@ -915,11 +1059,11 @@ async function preloadNeighborChapters(currentIndex: number) {
 }
 
 /** 加载指定章节的正文内容 */
-async function loadChapterContentByIndex(index: number) {
+async function loadChapterContentByIndex(index: number, forceRefresh: boolean = false) {
   chapterIndex.value = index
 
-  // 1. 若已有缓存，秒开展现
-  if (contentCache.value.has(index)) {
+  // 1. 若已有缓存且非强制刷新，秒开展现
+  if (!forceRefresh && contentCache.value.has(index)) {
     content.value = contentCache.value.get(index)!
     loadingContent.value = false
     contentError.value = ''
@@ -938,8 +1082,11 @@ async function loadChapterContentByIndex(index: number) {
   scrollToTop()
 
   try {
-    const res = await getChapterContent(identifier.value, targetChapter.id)
+    const res = await getChapterContent(identifier.value, targetChapter.id, forceRefresh ? { refresh: true } : undefined)
     const text = res?.content || ''
+    if (res?.contentUrl && targetChapter) {
+      targetChapter.contentUrl = res.contentUrl
+    }
     if (!text.trim()) {
       throw new Error('章节内容为空，可能书源规则不匹配')
     }
@@ -955,7 +1102,8 @@ async function loadChapterContentByIndex(index: number) {
 }
 
 async function loadCurrentChapterContent() {
-  await loadChapterContentByIndex(chapterIndex.value)
+  contentCache.value.delete(chapterIndex.value)
+  await loadChapterContentByIndex(chapterIndex.value, true)
 }
 
 function goToChapter(index: number) {
@@ -1101,10 +1249,14 @@ async function onSelectSwitchSource(item: CandidateSourceItem) {
     if (res && res.ok) {
       currentBook.value = res.book
       contentCache.value.clear()
+      preloadingSet.clear()
+      content.value = ''
       showChangeSource.value = false
       ElMessage.success(res.message || `已成功切换至【${item.sourceName}】`)
-      // 重新加载章节目录和阅读内容
-      await initBookAndChapters()
+
+      const targetIdx = typeof res.newChapterIndex === 'number' ? res.newChapterIndex : undefined
+      // 重新加载章节目录和阅读内容（强制从新书源拉取正文）
+      await initBookAndChapters(targetIdx, true)
     } else {
       throw new Error(res?.message || '换源响应异常')
     }
@@ -1632,11 +1784,26 @@ onUnmounted(() => {
   padding: 4px;
 }
 
-/* 章节滚动列表 */
+/* 章节滚动列表（虚拟滚动高性能容器） */
 .qd-toc-scroll {
   flex: 1;
   overflow-y: auto;
-  padding: 6px 0;
+  padding: 0;
+  position: relative;
+  contain: strict;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.qd-toc-virtual-wrap {
+  width: 100%;
+  position: relative;
+  box-sizing: border-box;
+}
+
+.qd-toc-virtual-list {
+  width: 100%;
+  will-change: transform;
 }
 
 .toc-empty-filter {
@@ -1650,7 +1817,8 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   width: 100%;
-  padding: 11px 20px;
+  height: 44px;
+  padding: 0 20px;
   background: transparent;
   border: none;
   border-left: 3px solid transparent;
@@ -1661,6 +1829,7 @@ onUnmounted(() => {
   transition: background-color 0.15s, border-color 0.15s;
   gap: 10px;
   box-sizing: border-box;
+  contain: content;
 }
 
 .qd-toc-cell:hover {
@@ -1873,6 +2042,21 @@ onUnmounted(() => {
 }
 
 .source-meta-click:hover {
+  opacity: 0.8;
+  text-decoration: underline;
+}
+
+.source-meta-link {
+  text-decoration: none;
+  cursor: pointer;
+  color: var(--color-accent, #c0692e);
+  transition: opacity 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.source-meta-link:hover {
   opacity: 0.8;
   text-decoration: underline;
 }

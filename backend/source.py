@@ -16,7 +16,7 @@ from bs4 import BeautifulSoup, Tag
 from curl_cffi import requests as cffi_requests
 
 from db import require_db
-from settings import get_proxy
+from settings import get_proxy, normalize_source_url
 from logger import get_logger
 
 logger = get_logger("source")
@@ -44,8 +44,11 @@ def decode_http_response(resp) -> str:
 def fetch_url(url: str, timeout: float = 20, base_url: str = "", context: str = "") -> str:
     t0 = time.perf_counter()
     url = (url or "").strip()
-    if base_url and not (url.startswith("http://") or url.startswith("https://")):
-        url = urljoin(base_url, url)
+    if base_url:
+        base_url = normalize_source_url(base_url.strip())
+        if not (url.startswith("http://") or url.startswith("https://")):
+            url = urljoin(base_url, url)
+    url = normalize_source_url(url)
     if not (url.startswith("http://") or url.startswith("https://")):
         raise ValueError(f"无效的请求地址: {url}")
 
@@ -213,12 +216,16 @@ class TocRule:
     selector: str = ""
     title: str = ""
     chapter_url: str = ""
+    next_toc_url: str = ""
 
 
 @dataclass
 class ContentRule:
     selector: str = ""
     text: str = ""
+    next_content_url: str = ""
+    replace_regex: str = ""
+    web_js: str = ""
 
 
 @dataclass
@@ -269,12 +276,16 @@ def parse_rule(s: str) -> SourceRule | None:
             selector=_s(sub.get("selector")),
             title=_s(sub.get("title")),
             chapter_url=_s(sub.get("chapterUrl")),
+            next_toc_url=_s(sub.get("nextTocUrl") or sub.get("nextUrl")),
         )
     if isinstance(raw.get("content"), dict):
         sub = raw["content"]
         out.content = ContentRule(
             selector=_s(sub.get("selector")),
             text=_s(sub.get("text")),
+            next_content_url=_s(sub.get("nextContentUrl") or sub.get("nextUrl")),
+            replace_regex=_s(sub.get("replaceRegex")),
+            web_js=_s(sub.get("webJs")),
         )
     return out
 
@@ -339,6 +350,7 @@ def _fill_native_toc(out: SourceRule, raw: dict) -> None:
         selector=selector,
         title=_s(rt.get("chapterName") or rt.get("title")),
         chapter_url=_s(rt.get("chapterUrl")),
+        next_toc_url=_s(rt.get("nextTocUrl")),
     )
 
 
@@ -355,7 +367,13 @@ def _fill_native_content(out: SourceRule, raw: dict) -> None:
     if "@" in content_rule:
         selector, attr = content_rule.rsplit("@", 1)
         selector, text = selector.strip(), attr.strip() or "text"
-    out.content = ContentRule(selector=selector.strip(), text=text)
+    out.content = ContentRule(
+        selector=selector.strip(),
+        text=text,
+        next_content_url=_s(rc.get("nextContentUrl")),
+        replace_regex=_s(rc.get("replaceRegex")),
+        web_js=_s(rc.get("webJs")),
+    )
 
 
 def parse_legado_rule(s: str) -> SourceRule | None:
@@ -529,21 +547,40 @@ def _or_default(s: str, d: str) -> str:
 _JS_POS = re.compile(r"\.(\d{1,2})\s*$")  # 行尾 `.N` 位置下标
 
 
-def _strip_js_pos_and_slice(selector: str) -> tuple[str, int | None, tuple[int | None, int | None] | None]:
+def convert_jsoup_to_css(sel: str) -> str:
+    """把 Legado jsoup 语法转为标准 CSS 选择器（tag.xxx -> xxx, class.xxx -> .xxx, id.xxx -> #xxx）。"""
+    s = (sel or "").strip()
+    if not s:
+        return ""
+    s = re.sub(r"(?:^|[\s>+~,])tag\.([a-zA-Z0-9_\-]+)", lambda m: m.group(0).replace("tag.", ""), s)
+    s = re.sub(r"(?:^|[\s>+~,])class\.([a-zA-Z0-9_\-]+)", lambda m: m.group(0).replace("class.", "."), s)
+    s = re.sub(r"(?:^|[\s>+~,])id\.([a-zA-Z0-9_\-]+)", lambda m: m.group(0).replace("id.", "#"), s)
+    return s.strip()
+
+
+def _strip_js_pos_and_slice(selector: str) -> tuple[str, int | None, tuple[int | None, int | None] | None, int | None]:
     """
-    处理 Legado 3.0 选择器末尾的位置下标与切片：
+    处理 Legado 3.0 选择器末尾的位置下标、切片与排除：
     例如：
-      .author.0        -> ('.author', 0, None)
-      div#info > p.0   -> ('div#info > p', 0, None)
-      div.con_top > a.1-> ('div.con_top > a', 1, None)
-      dd[9:]           -> ('dd', None, (9, None))
-      dd[0]            -> ('dd', 0, None)
+      .author.0        -> ('.author', 0, None, None)
+      div#info > p.0   -> ('div#info > p', 0, None, None)
+      div.con_top > a.1-> ('div.con_top > a', 1, None, None)
+      dd[9:]           -> ('dd', None, (9, None), None)
+      dd[0]            -> ('dd', 0, None, None)
+      p!0              -> ('p', None, None, 0) # 排除第0项
+      li!-1            -> ('li', None, None, -1) # 排除最后一项
     """
     s = (selector or "").strip()
     if not s:
-        return "", None, None
+        return "", None, None, None
 
-    # 1. 检查方括号切片 [9:] 或 [0]
+    # 1. 检查 !N 排除语法
+    excl_m = re.search(r"!(-?\d+)\s*$", s)
+    if excl_m:
+        base = s[: excl_m.start()].strip()
+        return base, None, None, int(excl_m.group(1))
+
+    # 2. 检查方括号切片 [9:] 或 [0]
     slice_m = re.search(r"\[(-?\d*):?(-?\d*)\]\s*$", s)
     if slice_m:
         base = s[: slice_m.start()].strip()
@@ -551,17 +588,17 @@ def _strip_js_pos_and_slice(selector: str) -> tuple[str, int | None, tuple[int |
         if ":" in slice_m.group(0):
             start = int(s1) if s1 else None
             stop = int(s2) if s2 else None
-            return base, None, (start, stop)
+            return base, None, (start, stop), None
         else:
-            return base, int(s1) if s1 else None, None
+            return base, int(s1) if s1 else None, None, None
 
-    # 2. 检查末尾 `.N` 或 `.-N`
+    # 3. 检查末尾 `.N` 或 `.-N`
     pos_m = re.search(r"\.(-?\d{1,3})\s*$", s)
     if pos_m:
         base = s[: pos_m.start()].strip()
-        return base, int(pos_m.group(1)), None
+        return base, int(pos_m.group(1)), None, None
 
-    return s, None, None
+    return s, None, None, None
 
 
 def sanitize_css_selector(sel: str) -> str:
@@ -578,7 +615,7 @@ def sanitize_css_selector(sel: str) -> str:
 
 
 def safe_select(el: Tag, selector: str) -> list[Tag]:
-    if not (selector or "").strip():
+    if not (selector or "").strip() or el is None:
         return []
     selector = selector.strip()
 
@@ -598,7 +635,7 @@ def safe_select(el: Tag, selector: str) -> list[Tag]:
             out.extend(safe_select(el, p))
         return out
 
-    base, pos_idx, slice_args = _strip_js_pos_and_slice(selector)
+    base, pos_idx, slice_args, excl_idx = _strip_js_pos_and_slice(selector)
     if not base:
         return [el]
 
@@ -615,7 +652,8 @@ def safe_select(el: Tag, selector: str) -> list[Tag]:
                     matched.append(tag)
         found = matched
     else:
-        sanitized_base = sanitize_css_selector(base)
+        css_converted = convert_jsoup_to_css(base)
+        sanitized_base = sanitize_css_selector(css_converted)
         try:
             found = list(el.select(sanitized_base))
         except Exception:
@@ -627,6 +665,13 @@ def safe_select(el: Tag, selector: str) -> list[Tag]:
     if slice_args is not None:
         start, stop = slice_args
         return found[slice(start, stop)]
+
+    if excl_idx is not None and found:
+        if 0 <= excl_idx < len(found):
+            found = [e for i, e in enumerate(found) if i != excl_idx]
+        elif excl_idx < 0 and abs(excl_idx) <= len(found):
+            idx = len(found) + excl_idx
+            found = [e for i, e in enumerate(found) if i != idx]
 
     if pos_idx is not None and found:
         if 0 <= pos_idx < len(found):
@@ -898,60 +943,174 @@ def normalize_extract_rule(rule: str, default: str) -> str:
     return r
 
 
-def extract_value(el: Tag | None, rule: str, base_url: str) -> str:
+def extract_values(el: Tag | None, rule: str, base_url: str = "") -> list[str]:
+    """
+    通用值提取引擎，支持：
+    1. XPath (//a[...] / /select/option/...)
+    2. Legado 级联属性选择器 (id.info@tag.p.0@text, class.next@tag.a@href, option@value)
+    3. 多值列表展开与 ## 正则替换
+    """
     if el is None:
-        return ""
+        return []
     rule = (rule or "").strip()
     if not rule:
-        return ""
+        return []
+
+    # 1. XPath 支持 (// 或 /)
+    if rule.startswith("//") or (rule.startswith("/") and not rule.startswith("/@")):
+        try:
+            import lxml.html
+            tree = lxml.html.fromstring(str(el))
+            xp_res = tree.xpath(rule)
+            out = []
+            for item in xp_res:
+                if isinstance(item, str):
+                    s = item.strip()
+                    if s:
+                        if base_url and not (s.startswith("http://") or s.startswith("https://")):
+                            s = urllib.parse.urljoin(base_url, s)
+                        out.append(s)
+                elif hasattr(item, "text_content"):
+                    s = item.text_content().strip()
+                    if s:
+                        out.append(s)
+            if out:
+                return out
+        except Exception:
+            pass
 
     # 分离基础规则与 ## 正则替换部分
     parts = rule.split("##")
     base_rule = parts[0].strip()
     replacements = parts[1:]
 
-    def _attr(target: Tag, attr: str) -> str:
-        attr = attr.strip()
-        if attr in ("text", "textN", "textNodes", "ownText"):
-            return target.get_text(separator="", strip=True)
-        if attr == "html":
-            return "".join(str(c) for c in target.contents).strip()
-        v = target.get(attr) or ""
-        if isinstance(v, list):
-            v = v[0] if v else ""
-        return abs_url(base_url, str(v).strip())
+    # 处理 || fallback
+    if "||" in base_rule:
+        for branch in base_rule.split("||"):
+            res = extract_values(el, branch.strip(), base_url)
+            if res:
+                return res
+        return []
 
-    val = ""
-    # 1. @attr 提取
-    if "@" in base_rule:
-        css, attr = base_rule.rsplit("@", 1)
-        css, attr = css.strip(), attr.strip()
-        target: Tag | None = el
-        if css:
-            target = safe_select_one(el, css)
-        if target is not None:
-            val = _attr(target, attr)
-    # 2. 特殊纯文本/HTML提取
-    elif base_rule in ("text", "textN", "textNodes", "ownText", ""):
-        val = el.get_text(separator="", strip=True)
-    elif base_rule == "html":
-        val = "".join(str(c) for c in el.contents).strip()
-    # 3. 普通 CSS 选择器 fallback
+    # 解析 @ 分段链路（例如 id.info@tag.p.0@text 或 class.next@tag.a@href 或 option@value）
+    segments = [s.strip() for s in base_rule.split("@") if s.strip()] if "@" in base_rule else [base_rule]
+    attr_names = {"text", "textn", "textnodes", "owntext", "html", "href", "src", "value", "content", "data-src", "id", "class", "title", "alt"}
+
+    attr = "text"
+    if segments and segments[-1].lower() in attr_names:
+        attr = segments[-1].lower()
+        selector_chain = segments[:-1]
     else:
-        found = safe_select_one(el, base_rule)
-        val = found.get_text(separator="", strip=True) if found is not None else ""
+        selector_chain = segments
 
-    # 执行 ## 正则替换
-    val = str(val)
-    for i in range(0, len(replacements), 2):
-        pattern = replacements[i]
-        repl = replacements[i + 1] if i + 1 < len(replacements) else ""
-        try:
-            val = re.sub(pattern, repl, val)
-        except Exception:
-            pass
+    current_nodes = [el]
+    for sel in selector_chain:
+        next_nodes = []
+        for node in current_nodes:
+            next_nodes.extend(safe_select(node, sel))
+        current_nodes = next_nodes
+        if not current_nodes:
+            break
 
-    return val.strip()
+    out = []
+    for node in current_nodes:
+        if attr in ("text", "textn", "textnodes", "owntext"):
+            val = node.get_text(separator=" ", strip=True)
+        elif attr == "html":
+            val = "".join(str(c) for c in node.contents).strip()
+        else:
+            v = node.get(attr) or ""
+            if isinstance(v, list):
+                v = v[0] if v else ""
+            val = str(v).strip()
+            if attr in ("href", "src", "value") and base_url and val and not (val.startswith("http://") or val.startswith("https://")):
+                val = urllib.parse.urljoin(base_url, val)
+            if attr in ("href", "src", "value") and val:
+                val = normalize_source_url(val)
+
+        # 执行 ## 正则替换
+        for i in range(0, len(replacements), 2):
+            pattern = replacements[i]
+            repl = replacements[i + 1] if i + 1 < len(replacements) else ""
+            try:
+                val = re.sub(pattern, repl, val)
+            except Exception:
+                pass
+
+        val = val.strip()
+        if val:
+            out.append(val)
+    return out
+
+
+def extract_value(el: Tag | None, rule: str, base_url: str = "") -> str:
+    """提取首个匹配值。"""
+    vals = extract_values(el, rule, base_url)
+    return vals[0] if vals else ""
+
+
+def apply_replace_regex(
+    content: str,
+    rule_str: str,
+    book_name: str = "",
+    chapter_title: str = "",
+) -> str:
+    """执行 Legado 3.0 正文净化规则（replaceRegex）。"""
+    if not content or not rule_str:
+        return content
+
+    rule = rule_str.strip()
+    if book_name:
+        rule = rule.replace("{{book.name}}", re.escape(book_name)).replace("{{name}}", re.escape(book_name))
+    if chapter_title:
+        rule = rule.replace("{{book.durChapterTitle}}", re.escape(chapter_title)).replace("{{title}}", re.escape(chapter_title))
+
+    # 提取 <js>...</js> 块中的规则
+    js_blocks = re.findall(r"<js>(.*?)</js>", rule, re.DOTALL)
+    if js_blocks:
+        for b in js_blocks:
+            content = apply_replace_regex(content, b, book_name, chapter_title)
+        rule = re.sub(r"<js>.*?</js>", "", rule, flags=re.DOTALL).strip()
+
+    # 处理 JS replace 表达式
+    if rule.startswith("@js:") or "result.replace" in rule or "content.replace" in rule:
+        js_replaces = re.findall(r"\.replace\(/([^/]+)/[a-z]*\s*,\s*['\"]([^'\"]*)['\"]\)", rule)
+        for pat, rep in js_replaces:
+            try:
+                content = re.sub(pat, rep, content)
+            except Exception:
+                pass
+        return content.strip()
+
+    lines = [l.strip() for l in rule.split("\n") if l.strip()]
+    for line in lines:
+        if line.startswith("##"):
+            parts = line.split("##")[1:]
+            for i in range(0, len(parts), 2):
+                pat = parts[i].strip()
+                rep = parts[i + 1] if i + 1 < len(parts) else ""
+                if pat:
+                    try:
+                        content = re.sub(pat, rep, content, flags=re.MULTILINE)
+                    except Exception:
+                        pass
+        elif "##" in line:
+            parts = line.split("##")
+            for i in range(0, len(parts), 2):
+                pat = parts[i].strip()
+                rep = parts[i + 1] if i + 1 < len(parts) else ""
+                if pat:
+                    try:
+                        content = re.sub(pat, rep, content, flags=re.MULTILINE)
+                    except Exception:
+                        pass
+        elif line:
+            try:
+                content = re.sub(line, "", content, flags=re.MULTILINE)
+            except Exception:
+                pass
+
+    return content.strip()
 
 
 def crawl_search(
@@ -1199,6 +1358,106 @@ def crawl_toc(
     return out
 
 
+def is_same_chapter_subpage(cur_url: str, next_url: str) -> bool:
+    """
+    判断 next_url 是否为当前章节的后续子分页（而非跳转到下一章）。
+    例如：
+      /book/1/1001.html -> /book/1/1001_2.html  (True，同章第2页)
+      /book/1/1001_1.html -> /book/1/1001_2.html(True，同章第2页)
+      /book/1/1001.html -> /book/1/1001-2.html  (True)
+      /book/1/1001.html?page=1 -> /book/1/1001.html?page=2 (True)
+      /book/1/1001.html -> /book/1/1002.html   (False，这是下一章)
+    """
+    if not cur_url or not next_url or cur_url == next_url:
+        return False
+    try:
+        p_cur = urllib.parse.urlparse(cur_url)
+        p_next = urllib.parse.urlparse(next_url)
+    except Exception:
+        return False
+
+    if p_cur.netloc != p_next.netloc:
+        return False
+
+    # 1. 相同路径，仅查询参数分页（如 ?page=2 或 &p=2）
+    if p_cur.path == p_next.path and p_next.query != p_cur.query:
+        return True
+
+    cur_path = p_cur.path.rstrip("/")
+    next_path = p_next.path.rstrip("/")
+
+    cur_base, cur_ext = cur_path.rsplit(".", 1) if "." in cur_path.split("/")[-1] else (cur_path, "")
+    next_base, next_ext = next_path.rsplit(".", 1) if "." in next_path.split("/")[-1] else (next_path, "")
+
+    # 2. 带有 _2, _3, -2, -3 后缀的子分页
+    cur_stem = re.sub(r"[_\-](\d+)$", "", cur_base)
+    next_stem_m = re.search(r"^(.*?)[_\-](\d+)$", next_base)
+    if next_stem_m:
+        next_stem = next_stem_m.group(1)
+        if next_stem == cur_stem or next_stem == cur_base:
+            return True
+
+    # 3. 路径层级子分页 /book/1/1001/ -> /book/1/1001/2
+    if next_path.startswith(cur_path + "/") and re.match(r"^\d+$", next_path[len(cur_path) + 1:]):
+        return True
+
+    return False
+
+
+def extract_next_content_url(
+    soup: BeautifulSoup,
+    cur_url: str,
+    rule_str: str = "",
+    base_url: str = "",
+) -> str:
+    """提取章节正文的下一页子分页链接。"""
+    raw_rule = (rule_str or "").strip()
+
+    # 1. 优先使用书源规则提取
+    if raw_rule:
+        js_code = ""
+        selector_part = raw_rule
+        if "<js>" in raw_rule:
+            m_js = re.search(r"<js>(.*?)</js>", raw_rule, re.DOTALL)
+            if m_js:
+                js_code = m_js.group(1).strip()
+            selector_part = re.sub(r"<js>.*?</js>", "", raw_rule, flags=re.DOTALL).strip()
+        elif "@js:" in raw_rule:
+            parts = raw_rule.split("@js:", 1)
+            selector_part = parts[0].strip()
+            js_code = parts[1].strip()
+
+        candidates = extract_values(soup, selector_part, cur_url)
+        for cand in candidates:
+            cand_url = cand
+            if js_code:
+                m_filter = re.search(r"/([^/]+)/\.test\(result\)\s*\?\s*result\s*:\s*['\"]([^'\"]*)['\"]", js_code)
+                if m_filter:
+                    pat, fallback = m_filter.group(1), m_filter.group(2)
+                    cand_url = cand_url if re.search(pat, cand_url) else fallback
+
+            if cand_url:
+                full_next = abs_url(cur_url, cand_url)
+                if full_next and full_next != cur_url:
+                    if js_code or is_same_chapter_subpage(cur_url, full_next):
+                        return full_next
+
+    # 2. 启发式自动寻找同章下一页链接
+    for a in soup.find_all("a"):
+        txt = a.get_text(strip=True)
+        href = a.get("href", "")
+        if not href or not txt:
+            continue
+        if any(bad in txt for bad in ["下一章", "下一篇", "下章", "上一章", "上一页", "上页", "返回目录", "目录", "加入书签"]):
+            continue
+        if txt in ["下一页", "下一页>", "下一页 >", "下一页»", "下页", "后页", "下一页(2/3)", "第2页", "第3页", "第4页"] or (txt.startswith("下一页") and "章" not in txt):
+            full_next = abs_url(cur_url, href)
+            if full_next and is_same_chapter_subpage(cur_url, full_next):
+                return full_next
+
+    return ""
+
+
 def fetch_all_toc(
     initial_url: str,
     rule: TocRule,
@@ -1206,25 +1465,30 @@ def fetch_all_toc(
     source_id: int | str = "",
     book_name: str = "",
     initial_html: str | None = None,
-    max_pages: int = 50,
+    max_pages: int = 80,
 ) -> list[dict]:
-    """抓取目录，支持分页跟进（下一页 / nextTocUrl）并汇聚完整章节列表。"""
-    cur_url = initial_url
-    cur_html = initial_html
+    """抓取目录，支持分页跟进（下一页 / 下拉选单 option@value / nextTocUrl）并汇聚完整章节列表。"""
+    pending_urls: list[str] = [initial_url]
     all_chapters: list[dict] = []
     seen_keys: set[str] = set()
     visited_pages: set[str] = set()
     page = 0
+    cur_html = initial_html
 
-    while cur_url and cur_url not in visited_pages and page < max_pages:
+    while pending_urls and page < max_pages:
+        cur_url = pending_urls.pop(0)
+        if cur_url in visited_pages:
+            continue
         visited_pages.add(cur_url)
         page += 1
+
         if cur_html is None:
             try:
                 cur_html = fetch_url(cur_url, context=f"目录第{page}页:{book_name}")
             except Exception as e:
                 logger.warning("[目录分页] [%s] 《%s》抓取目录第 %d 页失败 (%s): %s", source_name, book_name, page, cur_url, e)
-                break
+                cur_html = None
+                continue
 
         page_chapters = crawl_toc(
             cur_html,
@@ -1241,25 +1505,88 @@ def fetch_all_toc(
                 seen_keys.add(key)
                 all_chapters.append(c)
 
-        # 查找下一页链接
-        next_url = ""
+        # 发现后续目录页链接
         try:
             soup = BeautifulSoup(cur_html, "html.parser")
-            for a in soup.find_all("a"):
-                txt = a.get_text(strip=True)
-                href = a.get("href", "")
-                if href and (txt in ["下一页", "下一章列表", "下页", "下一部", "后页"] or (txt.startswith("下一") and "章" not in txt)):
-                    full_next = urllib.parse.urljoin(cur_url, href)
-                    if full_next not in visited_pages:
-                        next_url = full_next
-                        break
+            found_next_urls = []
+
+            # 1. 优先根据 rule.next_toc_url 提取
+            if rule.next_toc_url:
+                cands = extract_values(soup, rule.next_toc_url, cur_url)
+                for cand in cands:
+                    full_u = abs_url(cur_url, cand)
+                    if full_u and full_u not in visited_pages and full_u not in pending_urls:
+                        found_next_urls.append(full_u)
+
+            # 2. 启发式：若未找到，检查 <select> 目录下拉分页与 <a ...> 下一页链接
+            if not found_next_urls:
+                for sel in soup.find_all("select"):
+                    opts = sel.find_all("option")
+                    if len(opts) > 1:
+                        for opt in opts:
+                            v = opt.get("value", "").strip()
+                            if v:
+                                full_u = abs_url(cur_url, v)
+                                if full_u and full_u not in visited_pages and full_u not in pending_urls:
+                                    found_next_urls.append(full_u)
+
+                for a in soup.find_all("a"):
+                    txt = a.get_text(strip=True)
+                    href = a.get("href", "")
+                    if href and (txt in ["下一页", "下一章列表", "下页", "下一部", "后页", "下一页 >", "下一页»"] or (txt.startswith("下一") and "章" not in txt)):
+                        full_next = abs_url(cur_url, href)
+                        if full_next and full_next not in visited_pages and full_next not in pending_urls:
+                            found_next_urls.append(full_next)
+                            break
+
+            for u in found_next_urls:
+                if u not in visited_pages and u not in pending_urls:
+                    pending_urls.append(u)
         except Exception:
             pass
 
-        cur_url = next_url
         cur_html = None
 
     return all_chapters
+
+
+def crawl_content_single_page(
+    html: str,
+    rule: ContentRule | None,
+    source_name: str = "",
+    source_id: int | str = "",
+    book_name: str = "",
+    chapter_title: str = "",
+) -> list[str]:
+    """提取单页正文段落列表。"""
+    src_label = f"{source_name} (ID:{source_id})" if (source_name or source_id) else "正文解析"
+    title_label = f"《{book_name}》-「{chapter_title}」" if (book_name or chapter_title) else "章节正文"
+
+    if rule is None or not rule.selector:
+        try:
+            soup = BeautifulSoup(html, "lxml")
+        except Exception:
+            soup = BeautifulSoup(html, "html.parser")
+        text = soup.get_text(separator="\n", strip=True)
+        return [p.strip() for p in text.split("\n") if p.strip()]
+
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")
+
+    root = soup if isinstance(soup, Tag) else soup
+    elems = safe_select(root, rule.selector)
+    if not elems:
+        return []
+
+    paragraphs = []
+    text_rule = _or_default(rule.text, "text")
+    for el in elems:
+        p_text = extract_value(el, text_rule, "")
+        if p_text:
+            paragraphs.append(p_text)
+    return paragraphs
 
 
 def crawl_content(
@@ -1270,82 +1597,17 @@ def crawl_content(
     book_name: str = "",
     chapter_title: str = "",
 ) -> str:
-    src_label = f"{source_name} (ID:{source_id})" if (source_name or source_id) else "正文解析"
-    title_label = f"《{book_name}》-「{chapter_title}」" if (book_name or chapter_title) else "章节正文"
-
-    if rule is None:
-        logger.warning("[正文解析] [%s] %s未配置正文规则，返回原始 HTML", src_label, title_label)
-        return html
-
-    t0 = time.perf_counter()
-    try:
-        soup = BeautifulSoup(html, "lxml")
-    except Exception:
-        soup = BeautifulSoup(html, "html.parser")
-
-    if not rule.selector:
-        logger.info("[正文解析] [%s] %s正文选择器为空，回退使用全文纯文本提取", src_label, title_label)
-        text = soup.get_text(separator="\n", strip=True)
-        elapsed_ms = int((time.perf_counter() - t0) * 1000)
-        logger.info(
-            "[正文解析] [%s] 全文纯文本提取完成: 共 %d 字符 (耗时 %dms)",
-            src_label,
-            len(text),
-            elapsed_ms,
-        )
-        return text
-
-    logger.info(
-        "[正文解析] [%s] 开始解析%s (选择器: 「%s」, 提取规则: 「%s」)",
-        src_label,
-        title_label,
-        rule.selector,
-        rule.text or "text",
+    paragraphs = crawl_content_single_page(
+        html,
+        rule,
+        source_name=source_name,
+        source_id=source_id,
+        book_name=book_name,
+        chapter_title=chapter_title,
     )
-
-    root = soup if isinstance(soup, Tag) else soup
-    elems = safe_select(root, rule.selector)
-    if not elems:
-        logger.warning(
-            "[正文解析] [%s] %s正文选择器「%s」未能匹配到任何内容节点 (HTML 大小: %d 字符)，请检查正文规则或防爬拦截",
-            src_label,
-            title_label,
-            rule.selector,
-            len(html),
-        )
-        return ""
-
-    logger.info("[正文解析] [%s] %s正文选择器「%s」匹配到 %d 个段落节点", src_label, title_label, rule.selector, len(elems))
-
-    paragraphs = []
-    text_rule = _or_default(rule.text, "text")
-    for el in elems:
-        p_text = extract_value(el, text_rule, "")
-        if p_text:
-            paragraphs.append(p_text)
-
     content = "\n".join(paragraphs)
-    elapsed_ms = int((time.perf_counter() - t0) * 1000)
-    preview = (content[:50].replace("\n", " ") + "...") if len(content) > 50 else content.replace("\n", " ")
-
-    logger.info(
-        "[正文解析] [%s] %s正文提取成功: 共 %d 个段落, 总计 %d 字符 (耗时 %dms) [预览: 「%s」]",
-        src_label,
-        title_label,
-        len(paragraphs),
-        len(content),
-        elapsed_ms,
-        preview if preview else "无内容",
-    )
-
-    if len(content) < 50:
-        logger.warning(
-            "[正文解析] [%s] %s提取的正文较短 (仅 %d 字符)，请确认是否遭遇反爬、分页或规则需优化",
-            src_label,
-            title_label,
-            len(content),
-        )
-
+    if rule and rule.replace_regex:
+        content = apply_replace_regex(content, rule.replace_regex, book_name=book_name, chapter_title=chapter_title)
     return content
 
 
@@ -1446,8 +1708,8 @@ def refresh_web_chapters(book: dict) -> None:
         raise
 
     if not toc:
-        logger.warning("[目录抓取] [%s (ID:%s)] 《%s》(ID:%s) 未解析出任何有效章节，跳过数据库更新", src["name"], src["id"], book_name, book_id)
-        return
+        logger.warning("[目录抓取] [%s (ID:%s)] 《%s》(ID:%s) 未解析出任何有效章节", src["name"], src["id"], book_name, book_id)
+        raise ValueError(f"书源【{src['name']}】未解析出任何有效章节，请检查书源规则或网络")
 
     db_t0 = time.perf_counter()
     conn = require_db()
@@ -1470,6 +1732,9 @@ def refresh_web_chapters(book: dict) -> None:
 
 
 def fetch_web_chapter(book: dict, chapter_url: str, chapter_title: str = "") -> str:
+    """
+    抓取网络章节正文，支持同章多页分页自动合并与净化（nextContentUrl 与启发式子分页）。
+    """
     book_id = book.get("id") or 0
     book_name = book.get("name") or "未知书籍"
     src_id = int(book.get("source_id") or 0)
@@ -1490,9 +1755,28 @@ def fetch_web_chapter(book: dict, chapter_url: str, chapter_title: str = "") -> 
 
     t_label = f"「{chapter_title}」" if chapter_title else ""
     logger.info("[正文抓取] [%s (ID:%s)] 开始抓取《%s》%s正文 -> %s", src["name"], src["id"], book_name, t_label, target)
-    try:
-        html = fetch_url(target, context=f"正文页:{book_name}{t_label}")
-        return crawl_content(
+
+    cur_url = target
+    visited_urls: set[str] = set()
+    all_paragraphs: list[str] = []
+    page = 0
+    max_chapter_pages = 25
+    t0 = time.perf_counter()
+
+    while cur_url and cur_url not in visited_urls and page < max_chapter_pages:
+        visited_urls.add(cur_url)
+        page += 1
+        ctx = f"正文页{f'(第{page}页)' if page > 1 else ''}:{book_name}{t_label}"
+        try:
+            html = fetch_url(cur_url, context=ctx)
+        except Exception as e:
+            logger.error("[正文抓取] [%s (ID:%s)] 《%s》%s抓取第 %d 页失败: %s (URL: %s)", src["name"], src["id"], book_name, t_label, page, e, cur_url)
+            if page == 1:
+                raise
+            break
+
+        # 解析本页正文段落
+        page_paras = crawl_content_single_page(
             html,
             rule.content,
             source_name=src["name"],
@@ -1500,17 +1784,47 @@ def fetch_web_chapter(book: dict, chapter_url: str, chapter_title: str = "") -> 
             book_name=book_name,
             chapter_title=chapter_title,
         )
-    except Exception as e:
-        logger.error(
-            "[正文抓取] [%s (ID:%s)] 《%s》%s正文抓取失败: %s (URL: %s)",
-            src["name"],
-            src["id"],
-            book_name,
-            t_label,
-            e,
-            target,
-        )
-        raise
+
+        # 若多页分页在后续页顶部重复了章节名（如“第一章 ... (第2页)”），剔除重复标题段落
+        if page > 1 and page_paras and chapter_title:
+            first_p = page_paras[0].strip()
+            clean_ct = re.sub(r"\s+", "", chapter_title)
+            clean_fp = re.sub(r"\s+|（.*?）|\(.*?\)|第\d+页", "", first_p)
+            if clean_fp == clean_ct or (len(clean_ct) >= 2 and clean_ct in clean_fp):
+                page_paras = page_paras[1:]
+
+        all_paragraphs.extend(page_paras)
+
+        # 检查本章是否存在下一页子分页
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+            next_url = extract_next_content_url(soup, cur_url, rule.content.next_content_url, base_url=target)
+        except Exception:
+            next_url = ""
+
+        if next_url and next_url not in visited_urls:
+            logger.info("[正文分页] [%s] 《%s》%s发现同章后续分页第 %d 页 -> %s", src["name"], book_name, t_label, page + 1, next_url)
+            cur_url = next_url
+        else:
+            cur_url = ""
+
+    full_content = "\n".join(all_paragraphs)
+    if rule.content.replace_regex:
+        full_content = apply_replace_regex(full_content, rule.content.replace_regex, book_name=book_name, chapter_title=chapter_title)
+
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    logger.info(
+        "[正文完成] [%s (ID:%s)] 《%s》%s正文抓取完成: 共合并 %d 个子分页, %d 个段落, 总计 %d 字符 (耗时 %dms)",
+        src["name"],
+        src["id"],
+        book_name,
+        t_label,
+        page,
+        len(all_paragraphs),
+        len(full_content),
+        elapsed_ms,
+    )
+    return full_content
 
 
 def crawl_book_detail(book: dict) -> DetailRule:

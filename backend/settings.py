@@ -7,9 +7,12 @@
 """
 from __future__ import annotations
 
+import re
 from db import require_db
 
 PROXY_KEY = "proxy"
+PROXY_ENABLED_KEY = "proxy_enabled"
+M_TO_WWW_KEY = "m_to_www"
 TIMEOUT_KEY = "timeout"
 MAX_WORKERS_KEY = "max_workers"
 
@@ -33,9 +36,64 @@ def set_setting(key: str, value: str) -> None:
     conn.commit()
 
 
-def get_proxy() -> str:
-    """当前配置的 HTTP 代理地址，未配置则返回空串。"""
+def get_m_to_www() -> bool:
+    """是否开启移动端网址自动转换为桌面端 (m. -> www.) 开关。"""
+    v = get_setting(M_TO_WWW_KEY, "0")
+    return v in ("1", "true", "True", "yes", "on")
+
+
+def set_m_to_www(enabled: bool | str | int) -> None:
+    val = "1" if str(enabled).lower() in ("1", "true", "yes", "on") else "0"
+    set_setting(M_TO_WWW_KEY, val)
+
+
+def convert_m_to_www(url: str) -> str:
+    """将网址中的移动端域名前缀 m. 转换为 www."""
+    if not url or not isinstance(url, str):
+        return url
+    # 匹配 http://m. 或 https://m. 或 //m.
+    new_url = re.sub(r"^(https?://|//)m\.", r"\1www.", url, flags=re.IGNORECASE)
+    if new_url != url:
+        return new_url
+    # 匹配不带协议的域名 m.xxx.com
+    if re.match(r"^m\.[a-zA-Z0-9-]+\.[a-zA-Z]+", url, flags=re.IGNORECASE):
+        return re.sub(r"^m\.", r"www.", url, flags=re.IGNORECASE)
+    return url
+
+
+def normalize_source_url(url: str) -> str:
+    """根据系统设置对源 URL 进行规范化处理（若开启 m_to_www 则自动转为 www.）。"""
+    if not url or not isinstance(url, str):
+        return url
+    if get_m_to_www():
+        return convert_m_to_www(url)
+    return url
+
+
+def get_raw_proxy() -> str:
+    """获取数据库中保存的代理地址字符串（不论是否开启开关）。"""
     return (get_setting(PROXY_KEY) or "").strip()
+
+
+def get_proxy_enabled() -> bool:
+    """是否启用了网络代理总开关。"""
+    v = get_setting(PROXY_ENABLED_KEY, "")
+    if not v:
+        # 未显式配置开关时：若已有代理地址则默认开启，否则关闭
+        return bool(get_raw_proxy())
+    return v in ("1", "true", "True", "yes", "on")
+
+
+def set_proxy_enabled(enabled: bool | str | int) -> None:
+    val = "1" if str(enabled).lower() in ("1", "true", "yes", "on") else "0"
+    set_setting(PROXY_ENABLED_KEY, val)
+
+
+def get_proxy() -> str:
+    """当前生效的 HTTP 代理地址。若代理总开关未开启，则返回空字符串（直连）。"""
+    if not get_proxy_enabled():
+        return ""
+    return get_raw_proxy()
 
 
 def set_proxy(proxy: str) -> None:
@@ -49,7 +107,7 @@ def test_proxy_connection(proxy_url: str = "") -> dict:
     from curl_cffi import requests as cffi_requests
 
     t0 = time.perf_counter()
-    proxy = (proxy_url or get_proxy() or "").strip()
+    proxy = (proxy_url or get_raw_proxy() or "").strip()
     if not proxy:
         return {"ok": False, "error": "代理地址为空，请输入代理 URL", "delay": -1}
 
