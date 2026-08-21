@@ -1631,6 +1631,66 @@ def fetch_all_toc(
     return all_chapters
 
 
+def preprocess_js_rendered_content(soup: BeautifulSoup) -> None:
+    """
+    针对小说站点（如 69小说吧、yaolu、uxx、biquge 变体等）通过前端 JavaScript 动态将 Base64 / 混淆正文注入 DOM 容器的情况，
+    自动解析并将解码后的 HTML 注入到相应的 DOM 容器（如 #rtext, #content, .content 等）中。
+    """
+    import base64
+
+    for script in soup.find_all("script"):
+        script_text = script.get_text()
+        if not script_text or len(script_text) < 30:
+            continue
+
+        target_ids = re.findall(r"document\.getElementById\(['\"]([\w\-]+)['\"]\)\.innerHTML\s*=", script_text)
+        target_ids += re.findall(r"\$\(['\"]#([\w\-]+)['\"]\)\.html\(", script_text)
+
+        b64_matches = re.findall(
+            r"(?:encoded|content|html_data|chapter_content|txt_content|b64|raw_content|article_content)\s*=\s*[\"']([A-Za-z0-9+/=]{40,})[\"']",
+            script_text,
+            re.IGNORECASE,
+        )
+        if not b64_matches:
+            b64_candidates = re.findall(r"[\"']([A-Za-z0-9+/=]{100,})[\"']", script_text)
+            for cand in b64_candidates:
+                if cand.startswith("PHA+") or cand.startswith("PD") or cand.startswith("PG") or cand.startswith("Cg"):
+                    b64_matches.append(cand)
+
+        for b64_str in b64_matches:
+            try:
+                decoded_bytes = base64.b64decode(b64_str)
+                decoded_text = ""
+                for enc in ("utf-8", "gbk", "gb18030"):
+                    try:
+                        decoded_text = decoded_bytes.decode(enc)
+                        break
+                    except Exception:
+                        pass
+
+                if decoded_text and ("<p>" in decoded_text or "class=" in decoded_text or len(decoded_text) > 60):
+                    injected = False
+                    for tid in target_ids:
+                        target_elem = soup.find(id=tid)
+                        if target_elem is not None:
+                            sub_soup = BeautifulSoup(decoded_text, "html.parser")
+                            target_elem.clear()
+                            target_elem.append(sub_soup)
+                            injected = True
+
+                    if not injected:
+                        for def_id in ("rtext", "content", "chaptercontent", "htmlContent", "nr", "txt", "text", "article"):
+                            target_elem = soup.find(id=def_id)
+                            if target_elem is not None and not target_elem.get_text(strip=True):
+                                sub_soup = BeautifulSoup(decoded_text, "html.parser")
+                                target_elem.clear()
+                                target_elem.append(sub_soup)
+                                injected = True
+                                break
+            except Exception:
+                pass
+
+
 def crawl_content_single_page(
     html: str,
     rule: ContentRule | None,
@@ -1643,30 +1703,53 @@ def crawl_content_single_page(
     src_label = f"{source_name} (ID:{source_id})" if (source_name or source_id) else "正文解析"
     title_label = f"《{book_name}》-「{chapter_title}」" if (book_name or chapter_title) else "章节正文"
 
-    if rule is None or not rule.selector:
-        try:
-            soup = BeautifulSoup(html, "lxml")
-        except Exception:
-            soup = BeautifulSoup(html, "html.parser")
-        text = soup.get_text(separator="\n", strip=True)
-        return [p.strip() for p in text.split("\n") if p.strip()]
-
     try:
         soup = BeautifulSoup(html, "lxml")
     except Exception:
         soup = BeautifulSoup(html, "html.parser")
 
+    # 预处理：解析并注入 JS 动态 Base64 / 混淆编码正文
+    preprocess_js_rendered_content(soup)
+
+    if rule is None or not rule.selector:
+        text = soup.get_text(separator="\n", strip=True)
+        return [p.strip() for p in text.split("\n") if p.strip()]
+
     root = soup if isinstance(soup, Tag) else soup
     elems = safe_select(root, rule.selector)
-    if not elems:
-        return []
 
     paragraphs = []
     text_rule = _or_default(rule.text, "text")
-    for el in elems:
-        p_text = extract_value(el, text_rule, "")
-        if p_text:
-            paragraphs.append(p_text)
+    if elems:
+        for el in elems:
+            p_text = extract_value(el, text_rule, "")
+            if p_text:
+                paragraphs.append(p_text)
+
+    # 保底机制 1：如果规则指定了 p 标签选择器（如 #rtext p），但容器内直接包含纯文本或换行，尝试直接从容器本身提取
+    if not paragraphs and rule.selector and " p" in rule.selector:
+        parent_sel = rule.selector.split(" p", 1)[0].strip()
+        if parent_sel:
+            parent_elems = safe_select(root, parent_sel)
+            if parent_elems:
+                raw_text = parent_elems[0].get_text(separator="\n", strip=True)
+                candidate_paras = [p.strip() for p in raw_text.split("\n") if p.strip()]
+                if candidate_paras:
+                    paragraphs = candidate_paras
+                    logger.info("[正文解析] [%s] %s通过父容器 %s 备选提取到 %d 个段落", src_label, title_label, parent_sel, len(paragraphs))
+
+    # 保底机制 2：如果提取结果依然为空，尝试常见正文容器保底选择器
+    if not paragraphs:
+        for fallback_sel in ("#rtext", "#content", "#chaptercontent", "#htmlContent", ".read-content", ".content", "#nr", "#txt", "article"):
+            fb_elems = safe_select(root, fallback_sel)
+            if fb_elems:
+                fb_text = fb_elems[0].get_text(separator="\n", strip=True)
+                fb_paras = [p.strip() for p in fb_text.split("\n") if p.strip()]
+                if len(fb_paras) >= 3 or (fb_paras and len("".join(fb_paras)) > 100):
+                    paragraphs = fb_paras
+                    logger.info("[正文解析] [%s] %s主规则未命中，通过备选容器 %s 提取到 %d 个段落", src_label, title_label, fallback_sel, len(paragraphs))
+                    break
+
     return paragraphs
 
 

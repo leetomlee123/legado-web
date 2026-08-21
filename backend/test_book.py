@@ -140,6 +140,37 @@ def test_m_to_www_conversion():
     set_m_to_www(False)
 
 
+def test_js_dynamic_base64_content_preprocessing():
+    import base64
+    from source import ContentRule, crawl_content_single_page
+
+    raw_html_content = "<p>第一段：天青色等烟雨。</p><p>第二段：而我在等你。</p>"
+    encoded_b64 = base64.b64encode(raw_html_content.encode("utf-8")).decode("ascii")
+
+    full_page_html = f"""
+    <html>
+      <body>
+        <div class="readcontent" id="rtext"></div>
+        <script>
+          (function() {{
+            var encoded = "{encoded_b64}";
+            function decodeBase64Utf8(base64) {{
+              return atob(base64);
+            }}
+            document.getElementById('rtext').innerHTML = decodeBase64Utf8(encoded);
+          }})();
+        </script>
+      </body>
+    </html>
+    """
+
+    rule = ContentRule(selector="#rtext p", text="text", next_content_url="", replace_regex="")
+    paras = crawl_content_single_page(full_page_html, rule)
+    assert len(paras) == 2, paras
+    assert paras[0] == "第一段：天青色等烟雨。"
+    assert paras[1] == "第二段：而我在等你。"
+
+
 if __name__ == "__main__":
     test_parse_chapters()
     test_parse_chapters_fallback()
@@ -152,5 +183,6 @@ if __name__ == "__main__":
     test_extract_next_content_url_with_js()
     test_parse_legado_rule_with_pagination()
     test_m_to_www_conversion()
+    test_js_dynamic_base64_content_preprocessing()
     print("All test_book.py tests passed successfully!")
 
