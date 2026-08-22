@@ -171,6 +171,33 @@ def test_js_dynamic_base64_content_preprocessing():
     assert paras[1] == "第二段：而我在等你。"
 
 
+def test_explore_url_parsing_and_resolution():
+    from source import parse_explore_items, resolve_explore_url
+
+    # 1. 测试标准与宽松 JSON 格式
+    json_spec = """[
+      {"title": "玄幻魔法", "url": "/sort/1/{{page}}/", "style": {"layout_flexGrow": 0.25}},
+      {"title": "武侠修真", "url": "/sort/2/{{page}}/", "style": {"layout_flexGrow": 0.25}}
+    ]"""
+    items = parse_explore_items(json_spec)
+    assert len(items) == 2
+    assert items[0]["title"] == "玄幻魔法"
+    assert items[0]["url"] == "/sort/1/{{page}}/"
+
+    # 2. 测试文本多行与 :: 语法
+    text_spec = "玄幻::/sort/1/<,{{page}}.html>\n仙侠::/sort/2/<,{{page}}.html>"
+    items2 = parse_explore_items(text_spec)
+    assert len(items2) == 2
+    assert items2[0]["title"] == "玄幻"
+    assert items2[0]["url"] == "/sort/1/<,{{page}}.html>"
+
+    # 3. 测试分页宏解析
+    u1 = resolve_explore_url("/sort/1/<,{{page}}.html>", page=1, base_url="https://test.com")
+    assert u1 == "https://test.com/sort/1/"
+    u2 = resolve_explore_url("/sort/1/<,{{page}}.html>", page=2, base_url="https://test.com")
+    assert u2 == "https://test.com/sort/1/2.html"
+
+
 if __name__ == "__main__":
     test_parse_chapters()
     test_parse_chapters_fallback()
@@ -184,5 +211,6 @@ if __name__ == "__main__":
     test_parse_legado_rule_with_pagination()
     test_m_to_www_conversion()
     test_js_dynamic_base64_content_preprocessing()
+    test_explore_url_parsing_and_resolution()
     print("All test_book.py tests passed successfully!")
 

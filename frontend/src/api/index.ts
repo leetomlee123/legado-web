@@ -7,6 +7,9 @@ import type {
   Paged,
   SourceSearchRes,
   ReadProgress,
+  ExploreSource,
+  ExploreBook,
+  ExploreItem,
 } from '@/types'
 
 // 书架
@@ -496,4 +499,27 @@ export function subscribeLogsStream(
     })
 
   return () => controller.abort()
-}
+}
+
+// ─── 探索 / 发现 API ──────────────────────────────────────────
+
+export async function fetchExploreSources(): Promise<ExploreSource[]> {
+  const res = await http.get('/explore/sources')
+  return res as unknown as ExploreSource[]
+}
+
+export async function fetchExploreBooks(
+  sourceId: number,
+  exploreUrl: string,
+  page: number = 1,
+): Promise<{ books: ExploreBook[]; page: number; hasMore: boolean }> {
+  const res = await http.get('/explore/books', {
+    params: {
+      source_id: sourceId,
+      explore_url: exploreUrl,
+      page,
+    },
+  })
+  return res as unknown as { books: ExploreBook[]; page: number; hasMore: boolean }
+}
+

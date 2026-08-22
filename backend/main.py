@@ -35,10 +35,12 @@ from logger import (
 )
 from source import (
     crawl_book_detail,
+    crawl_explore_books,
     crawl_search,
     fetch_url,
     fetch_web_chapter,
     legado_rule_insert,
+    parse_explore_items,
     parse_legado_rule,
     refresh_web_chapters,
     split_legado_rules,
@@ -1322,6 +1324,62 @@ def delete_dead_sources_route():
     from health import health_manager
     count = health_manager.delete_dead_sources()
     return jsonify({"ok": True, "deletedCount": count, "message": f"已成功删除 {count} 个失效书源"})
+
+
+# ─── 发现 / 探索 API ──────────────────────────────────────────
+
+@app.get("/api/explore/sources")
+def list_explore_sources():
+    """获取所有支持发现/探索分类的书源列表及其分类规则项。"""
+    conn = require_db()
+    rows = conn.execute("SELECT id, name, url, rule, enabled FROM book_source WHERE enabled=1 ORDER BY id ASC").fetchall()
+    sources = []
+    for r in rows:
+        raw_rule = json.loads(r["rule"]) if r["rule"] else {}
+        exp_url = raw_rule.get("exploreUrl")
+        if not exp_url:
+            continue
+        items = parse_explore_items(str(exp_url))
+        if not items:
+            continue
+        group = raw_rule.get("bookSourceGroup") or "默认分组"
+        sources.append({
+            "id": r["id"],
+            "name": r["name"],
+            "url": raw_rule.get("bookSourceUrl") or r["url"],
+            "group": group,
+            "exploreItems": items,
+        })
+    return jsonify(sources)
+
+
+@app.get("/api/explore/books")
+def get_explore_books():
+    """按书源与探索分类抓取书籍列表。"""
+    source_id_str = request.args.get("source_id") or request.args.get("sourceId") or ""
+    explore_url = request.args.get("explore_url") or request.args.get("exploreUrl") or request.args.get("url") or ""
+    page = max(1, query_int("page", 1))
+
+    if not source_id_str:
+        return jsonify({"error": "缺少 source_id 参数"}), 400
+    try:
+        source_id = int(source_id_str)
+    except ValueError:
+        return jsonify({"error": "无效的 source_id 参数"}), 400
+
+    if not explore_url:
+        return jsonify({"error": "缺少 explore_url 参数"}), 400
+
+    try:
+        books = crawl_explore_books(source_id=source_id, explore_url=explore_url, page=page)
+        return jsonify({
+            "books": books,
+            "page": page,
+            "hasMore": len(books) > 0,
+        })
+    except Exception as e:
+        logger.error("[探索接口] 抓取失败: %s", e)
+        return jsonify({"error": f"探索抓取失败: {e}", "books": [], "page": page, "hasMore": False}), 500
 
 
 @app.get("/api/logs")

@@ -2014,3 +2014,285 @@ def crawl_book_detail(book: dict) -> DetailRule:
         source_id=src["id"],
         book_name=book_name,
     )
+
+
+# ─── 探索 / 发现模块 (Explore Rules) ──────────────────────────
+
+def parse_explore_items(explore_url_str: str) -> list[dict]:
+    """解析 Legado 书源中的 exploreUrl 规则定义。"""
+    if not explore_url_str:
+        return []
+    s = explore_url_str.strip()
+
+    # 1. 尝试 JSON 格式解析（支持带注释、单引号、尾随逗号）
+    cleaned = re.sub(r"//.*", "", s)
+    cleaned = re.sub(r"/\*.*?\*/", "", cleaned, flags=re.DOTALL).strip()
+
+    if cleaned.startswith("[") or cleaned.startswith("{"):
+        # 先直接尝试原生 json.loads
+        try:
+            data = json.loads(cleaned)
+            if isinstance(data, list):
+                out = []
+                for item in data:
+                    if isinstance(item, dict):
+                        t = str(item.get("title") or item.get("name") or "").strip()
+                        u = str(item.get("url") or "").strip()
+                        if t and not (t.startswith("@js:") or t in ("[", "]", "{", "}")):
+                            out.append({"title": t, "url": u, "style": item.get("style") or {}})
+                if out:
+                    return out
+            elif isinstance(data, dict):
+                t = str(data.get("title") or data.get("name") or "").strip()
+                u = str(data.get("url") or "").strip()
+                if t and not (t.startswith("@js:") or t in ("[", "]", "{", "}")):
+                    return [{"title": t, "url": u, "style": data.get("style") or {}}]
+        except Exception:
+            # 尝试宽松 JSON 修复：尾随逗号、未加双引号的 key
+            fix_json = re.sub(r",\s*([\]}])", r"\1", cleaned)
+            fix_json = re.sub(r'(?<!")(\b[a-zA-Z_]\w*\b)\s*:', r'"\1":', fix_json)
+            try:
+                data = json.loads(fix_json)
+                if isinstance(data, list):
+                    out = []
+                    for item in data:
+                        if isinstance(item, dict):
+                            t = str(item.get("title") or item.get("name") or "").strip()
+                            u = str(item.get("url") or "").strip()
+                            if t and not (t.startswith("@js:") or t in ("[", "]", "{", "}")):
+                                out.append({"title": t, "url": u, "style": item.get("style") or {}})
+                    if out:
+                        return out
+            except Exception:
+                pass
+
+    # 2. 如果包含 title 和 url 结构，正则提取对象字典
+    if ("title" in s or "title:" in s) and ("url" in s or "url:" in s):
+        blocks = re.findall(r"\{[^{}]*\}", s)
+        out = []
+        for b in blocks:
+            m_t = re.search(r'["\']?title["\']?\s*:\s*["\']([^"\']+)["\']', b)
+            m_u = re.search(r'["\']?url["\']?\s*:\s*["\']([^"\']*)["\']', b)
+            if m_t:
+                t = m_t.group(1).strip()
+                u = m_u.group(1).strip() if m_u else ""
+                if t and not (t.startswith("@js:") or t in ("[", "]", "{", "}", ");", "})")):
+                    out.append({"title": t, "url": u, "style": {}})
+        if out:
+            return out
+
+    # 3. 按行与分隔符解析：支持 Title::url, Title&&Title2::url2, Title\turl, Title\nurl
+    lines = [l.strip() for l in s.split("\n") if l.strip()]
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("//") or line.startswith("/*") or line.startswith("*") or line in ("[", "]", "{", "}", ");", "})", ";"):
+            i += 1
+            continue
+
+        # 包含 && 分割的多个项
+        if "&&" in line and "::" in line:
+            sub_items = line.split("&&")
+            for sub in sub_items:
+                if "::" in sub:
+                    parts = sub.split("::", 1)
+                    t, u = parts[0].strip(), parts[1].strip()
+                    if t and not t.startswith("@js:"):
+                        out.append({"title": t, "url": u, "style": {}})
+            i += 1
+            continue
+
+        if "::" in line:
+            parts = line.split("::", 1)
+            t, u = parts[0].strip(), parts[1].strip()
+            if t and not t.startswith("@js:"):
+                out.append({"title": t, "url": u, "style": {}})
+            i += 1
+        elif "\t" in line:
+            parts = line.split("\t", 1)
+            t, u = parts[0].strip(), parts[1].strip()
+            if t and not t.startswith("@js:"):
+                out.append({"title": t, "url": u, "style": {}})
+            i += 1
+        else:
+            # 可能是标题占一行，url 在下一行
+            if i + 1 < len(lines) and ("/" in lines[i + 1] or "http" in lines[i + 1] or "{{" in lines[i + 1]):
+                t = line
+                u = lines[i + 1]
+                if t and not t.startswith("@js:"):
+                    out.append({"title": t, "url": u, "style": {}})
+                i += 2
+            else:
+                # 分组/分类标题（url 为空）
+                if line and not (line.startswith("@js:") or line.startswith("sort=") or line.startswith("push=")):
+                    out.append({"title": line, "url": "", "style": {}})
+                i += 1
+
+    return out
+
+
+def resolve_explore_url(raw_url: str, page: int = 1, base_url: str = "") -> str:
+    """处理 Legado 探索 URL 中的分页宏与尖括号语法。"""
+    url = (raw_url or "").strip()
+    if not url:
+        return ""
+
+    # 处理 <prefix,suffix> 语法（例如 /xuanhuan/<,{{page}}.html> 在第1页为 /xuanhuan/，在第2页为 /xuanhuan/2.html）
+    def _replace_angle_brackets(match):
+        p1 = match.group(1)
+        p2 = match.group(2)
+        return p1 if page == 1 else p2
+
+    url = re.sub(r"<([^,>]*),([^>]*)>", _replace_angle_brackets, url)
+
+    # 替换分页宏
+    url = url.replace("{{page}}", str(page))
+    url = url.replace("{{page+1}}", str(page + 1))
+    url = url.replace("{{page-1}}", str(max(0, page - 1)))
+    url = url.replace("{{(page-1)*10}}", str((page - 1) * 10))
+    url = url.replace("{{(page-1)*20}}", str((page - 1) * 20))
+    url = url.replace("{{(page-1)*50}}", str((page - 1) * 50))
+    url = re.sub(r"\{\{.*?\}\}", str(page), url)
+
+    if base_url and not (url.startswith("http://") or url.startswith("https://")):
+        url = urljoin(base_url, url)
+
+    return url
+
+
+def crawl_explore_books(
+    source_id: int,
+    explore_url: str,
+    page: int = 1,
+    timeout: int = 20,
+) -> list[dict]:
+    """抓取并解析指定书源的探索/分类列表页书籍。"""
+    src = source_by_id(source_id)
+    if not src:
+        raise ValueError(f"书源 (ID:{source_id}) 不存在")
+
+    raw_rule = json.loads(src["rule"]) if src.get("rule") else {}
+    base_url = raw_rule.get("bookSourceUrl") or src.get("url") or ""
+    rule_exp = raw_rule.get("ruleExplore") or {}
+    rule_search = raw_rule.get("ruleSearch") or {}
+
+    rule_merged = dict(rule_search)
+    rule_merged.update({k: v for k, v in rule_exp.items() if v})
+
+    target_url = resolve_explore_url(explore_url, page=page, base_url=base_url)
+    if not target_url:
+        raise ValueError("无效的探索目标地址")
+
+    src_label = f"{src['name']} (ID:{source_id})"
+    logger.info("[探索抓取] [%s] 开始抓取探索分类第 %d 页 -> %s", src_label, page, target_url)
+
+    html = fetch_url(target_url, timeout=timeout, base_url=base_url, context=f"探索:{src['name']}")
+    if not html:
+        return []
+
+    # 1. 尝试 JSON 解析
+    s_trim = html.strip()
+    is_json = False
+    data = None
+    if (s_trim.startswith("{") and s_trim.endswith("}")) or (s_trim.startswith("[") and s_trim.endswith("]")):
+        try:
+            data = json.loads(s_trim)
+            is_json = True
+        except Exception:
+            is_json = False
+
+    if is_json and data is not None:
+        book_list_field = str(rule_merged.get("bookList", "")).replace("$.", "").strip()
+        items_data = []
+        if isinstance(data, list):
+            items_data = data
+        elif isinstance(data, dict):
+            if book_list_field and book_list_field in data:
+                items_data = data[book_list_field]
+            elif "data" in data and isinstance(data["data"], list):
+                items_data = data["data"]
+            elif "list" in data and isinstance(data["list"], list):
+                items_data = data["list"]
+            elif "books" in data and isinstance(data["books"], list):
+                items_data = data["books"]
+
+        books = []
+        for item in items_data:
+            if not isinstance(item, dict):
+                continue
+            name_key = str(rule_merged.get("name", "name")).replace("$.", "").strip()
+            author_key = str(rule_merged.get("author", "author")).replace("$.", "").strip()
+            cover_key = str(rule_merged.get("coverUrl", rule_merged.get("cover", "cover"))).replace("$.", "").strip()
+            intro_key = str(rule_merged.get("intro", "intro")).replace("$.", "").strip()
+            kind_key = str(rule_merged.get("kind", "kind")).replace("$.", "").strip()
+            burl_rule = str(rule_merged.get("bookUrl", "")).strip()
+
+            name = str(item.get(name_key) or item.get("book_name") or item.get("title") or item.get("name") or "").strip()
+            author = str(item.get(author_key) or item.get("author") or "").strip()
+            cover = str(item.get(cover_key) or item.get("thumb_url") or item.get("cover") or "").strip()
+            intro = str(item.get(intro_key) or item.get("abstract") or item.get("desc") or item.get("intro") or "").strip()
+            kind = str(item.get(kind_key) or item.get("category") or "").strip()
+
+            burl = burl_rule
+            for k, v in item.items():
+                burl = burl.replace(f"{{{{$.{k}}}}}", str(v)).replace(f"{{{{{k}}}}}", str(v))
+            if not burl or burl == burl_rule:
+                burl = str(item.get("bookUrl") or item.get("url") or item.get("book_url") or "")
+            if base_url and burl and not (burl.startswith("http://") or burl.startswith("https://")):
+                burl = urljoin(base_url, burl)
+
+            if name:
+                books.append({
+                    "name": name,
+                    "author": author,
+                    "cover": cover,
+                    "intro": intro,
+                    "kind": kind,
+                    "book_url": burl,
+                    "source_id": source_id,
+                    "source_name": src["name"],
+                })
+
+        logger.info("[探索抓取] [%s] JSON 解析完成，获取到 %d 本书籍", src_label, len(books))
+        return books
+
+    # 2. HTML DOM 解析
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")
+
+    book_list_rule = rule_merged.get("bookList")
+    if not book_list_rule:
+        logger.warning("[探索抓取] [%s] 缺少 bookList 选择器", src_label)
+        return []
+
+    nodes = safe_select(soup, book_list_rule)
+    books = []
+    for node in nodes:
+        name = extract_value(node, rule_merged.get("name") or "text", base_url).strip()
+        author = extract_value(node, rule_merged.get("author") or "", base_url).strip()
+        cover = extract_value(node, rule_merged.get("coverUrl") or rule_merged.get("cover") or "", base_url).strip()
+        intro = extract_value(node, rule_merged.get("intro") or "", base_url).strip()
+        kind = extract_value(node, rule_merged.get("kind") or "", base_url).strip()
+        word_count = extract_value(node, rule_merged.get("wordCount") or "", base_url).strip()
+        last_chapter = extract_value(node, rule_merged.get("lastChapter") or "", base_url).strip()
+        burl = extract_value(node, normalize_extract_rule(rule_merged.get("bookUrl") or "", "a@href"), base_url).strip()
+
+        if name or burl:
+            books.append({
+                "name": name,
+                "author": author,
+                "cover": cover,
+                "intro": intro,
+                "kind": kind,
+                "word_count": word_count,
+                "last_chapter": last_chapter,
+                "book_url": burl,
+                "source_id": source_id,
+                "source_name": src["name"],
+            })
+
+    logger.info("[探索抓取] [%s] HTML 解析完成，获取到 %d 本书籍", src_label, len(books))
+    return books

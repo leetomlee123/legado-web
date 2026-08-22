@@ -68,3 +68,30 @@ export interface ReadProgress {
   pos?: number
   updateTime?: number
 }
+
+export interface ExploreItem {
+  title: string
+  url: string
+  style?: Record<string, any>
+}
+
+export interface ExploreSource {
+  id: number
+  name: string
+  url: string
+  group: string
+  exploreItems: ExploreItem[]
+}
+
+export interface ExploreBook {
+  name: string
+  author: string
+  cover: string
+  intro: string
+  kind?: string
+  word_count?: string
+  last_chapter?: string
+  book_url: string
+  source_id: number
+  source_name: string
+}
