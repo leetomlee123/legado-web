@@ -458,7 +458,8 @@ def get_chapter_content(identifier: str, cid: int):
     chapter_idx = row["idx"] if "idx" in row.keys() else 0
 
     refresh = request.args.get("refresh") in ("1", "true", "True")
-    if (not content.strip() or refresh) and content_url:
+    is_invalid_cache = not content.strip() or len(content.strip()) < 50 or "点击催更" in content
+    if (is_invalid_cache or refresh) and content_url:
         if (b["source_type"] or "") == "web":
             logger.info(
                 "[正文读取] 《%s》(ID:%s) 第 %d 章「%s」(CID:%s) %s，开始从网络抓取...",
@@ -467,7 +468,7 @@ def get_chapter_content(identifier: str, cid: int):
                 chapter_idx,
                 chapter_title,
                 cid,
-                "强制刷新正文" if refresh else "无正文缓存",
+                "强制刷新正文" if refresh else ("历史缓存异常/过短，自动重抓" if content.strip() else "无正文缓存"),
             )
             t0 = time.perf_counter()
             try:

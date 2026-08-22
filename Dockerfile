@@ -23,11 +23,12 @@ ENV TZ=Asia/Shanghai \
 
 WORKDIR /app
 
-# 安装基础运行依赖
+# 安装基础运行依赖（含 Node.js 供书源复杂 JS 沙箱及 dynamic AJAX 执行）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
     curl \
+    nodejs \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 

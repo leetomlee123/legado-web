@@ -1095,6 +1095,29 @@ def eval_js_snippet(code: str, result: str = "", base_url: str = "", book: dict 
 
     # 2. 复杂 JS 代码使用 Node.js 执行（内置 java.ajax, java.md5Encode, java.base64Encode, etc.）
     import subprocess
+    import shutil
+    import os
+
+    node_bin = None
+    for cand in [
+        shutil.which("node"),
+        "/usr/bin/node",
+        "/usr/local/bin/node",
+        "/root/.nvm/versions/node/v24.19.0/bin/node",
+    ]:
+        if cand and os.path.exists(cand) and os.access(cand, os.X_OK):
+            node_bin = cand
+            break
+
+    if not node_bin:
+        nvm_dir = os.path.expanduser("~/.nvm/versions/node")
+        if os.path.isdir(nvm_dir):
+            for sub in sorted(os.listdir(nvm_dir), reverse=True):
+                c_bin = os.path.join(nvm_dir, sub, "bin", "node")
+                if os.path.exists(c_bin) and os.access(c_bin, os.X_OK):
+                    node_bin = c_bin
+                    break
+
     book_ctx = book if isinstance(book, dict) else {"bookUrl": base_url, "name": ""}
     chapter_ctx = chapter if isinstance(chapter, dict) else {}
     script = f"""
@@ -1171,11 +1194,51 @@ def eval_js_snippet(code: str, result: str = "", base_url: str = "", book: dict 
         process.stdout.write(String(result));
     }}
     """
-    try:
-        p = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=18.0)
-        return p.stdout
-    except Exception:
-        return result
+    if node_bin:
+        try:
+            p = subprocess.run([node_bin, "-e", script], capture_output=True, text=True, timeout=18.0)
+            if p.returncode == 0 and p.stdout:
+                return p.stdout
+        except Exception:
+            pass
+
+    # 3. 纯 Python 动态 AJAX 兜底机制（无 Node 运行环境时）
+    if "chapter.js.php" in code or ("chapterToken" in code and "ajax2.php" in code):
+        try:
+            m_aid_cid = re.search(r"/books/(\d+)/(\d+)\.html", base_url)
+            if m_aid_cid:
+                aid, cid = m_aid_cid.group(1), m_aid_cid.group(2)
+                parsed_u = urllib.parse.urlparse(base_url)
+                b_host = parsed_u.netloc
+                scheme = parsed_u.scheme or "https"
+                token_url = f"{scheme}://{b_host}/scripts/chapter.js.php?aid={aid}&cid={cid}&referrer={base_url}"
+                token_js = fetch_url(token_url, context="Token获取")
+                token_m = re.search(r"chapterToken\s*=\s*'([^']+)'", token_js)
+                ts_m = re.search(r"timestamp\s*=\s*(\d+)", token_js)
+                nonce_m = re.search(r"nonce\s*=\s*'([^']+)'", token_js)
+                if token_m and ts_m and nonce_m:
+                    t_val = token_m.group(1)
+                    ts_val = ts_m.group(1)
+                    n_val = nonce_m.group(1)
+                    ajax_url = f"{scheme}://{b_host}/modules/article/ajax2.php?aid={aid}&cid={cid}&token={t_val}&timestamp={ts_val}&nonce={n_val}"
+                    ajax_resp = fetch_url(
+                        ajax_url,
+                        headers={
+                            "Referer": base_url,
+                            "X-Requested-With": "XMLHttpRequest",
+                            "Accept": "text/plain, */*; q=0.01",
+                            "Sec-Fetch-Dest": "empty",
+                            "Sec-Fetch-Mode": "cors",
+                            "Sec-Fetch-Site": "same-origin",
+                        },
+                        context="正文AJAX"
+                    )
+                    if ajax_resp:
+                        return ajax_resp
+        except Exception:
+            pass
+
+    return result
 
 
 def extract_values(el: Tag | dict | list | str | None, rule: str, base_url: str = "") -> list[str]:
