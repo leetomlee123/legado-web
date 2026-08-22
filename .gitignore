@@ -16,3 +16,5 @@ data/*
 
 .venv/
 __pycache__/
+*.jsonl
+backend/diagnose_results.json
