@@ -2186,17 +2186,24 @@ def crawl_content_single_page(
     # 优先：使用全功能 Legado 规则引擎 (支持 <js> java.ajax, JSONPath, {{@@}}, ##, XPath, etc.)
     rule_expr = rule.selector
     try:
-        extracted = extract_value(soup, rule_expr, chapter_url)
-        if extracted:
-            if "<br" in extracted or "<p" in extracted or "<div" in extracted:
-                sub_soup = BeautifulSoup(extracted, "html.parser")
-                for br in sub_soup.find_all(["br", "p"]):
-                    br.replace_with("\n" + br.get_text())
-                raw_text = sub_soup.get_text(separator="\n", strip=True)
-            else:
-                raw_text = extracted
-            cand_paras = [p.strip() for p in raw_text.split("\n") if p.strip()]
-            if len(cand_paras) >= 2 or (cand_paras and len("".join(cand_paras)) > 30):
+        extracted_list = extract_values(soup, rule_expr, chapter_url)
+        if extracted_list:
+            cand_paras = []
+            for extracted in extracted_list:
+                if not extracted:
+                    continue
+                if "<br" in extracted or "<p" in extracted or "<div" in extracted:
+                    sub_soup = BeautifulSoup(extracted, "html.parser")
+                    for br in sub_soup.find_all(["br", "p"]):
+                        br.replace_with("\n" + br.get_text())
+                    raw_text = sub_soup.get_text(separator="\n", strip=True)
+                else:
+                    raw_text = extracted
+                for p in raw_text.split("\n"):
+                    p_clean = p.strip()
+                    if p_clean:
+                        cand_paras.append(p_clean)
+            if cand_paras:
                 paragraphs = cand_paras
     except Exception as e:
         logger.warning("[正文解析] [%s] %s主规则执行异常: %s", src_label, title_label, e)
