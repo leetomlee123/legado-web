@@ -247,8 +247,19 @@
             <button class="btn-qd-retry" @click="loadCurrentChapterContent">重新抓取本章</button>
           </div>
 
-          <!-- 正文段落 -->
-          <div v-else class="chapter-content-body" v-html="rendered" aria-live="polite"></div>
+          <!-- 正文段落（支持 TTS 高亮朗读与点击选段朗读） -->
+          <div v-else class="chapter-content-body" aria-live="polite">
+            <p
+              v-for="(p, pIdx) in paragraphs"
+              :key="pIdx"
+              :id="`chapter-p-${pIdx}`"
+              class="chapter-para"
+              :class="{ 'tts-active-para': isTtsActive && ttsParaIndex === pIdx }"
+              @click="onParaClick(pIdx)"
+            >
+              {{ p }}
+            </p>
+          </div>
 
           <!-- 底部起点式章节翻页栏 -->
           <div v-if="!loadingContent && !contentError && chapters.length" class="chapter-bottom-nav">
@@ -640,6 +651,159 @@
         </div>
       </transition>
     </Teleport>
+
+    <!-- ── 底部 TTS 语音朗读悬浮控制条（起点/微信读书风格）───── -->
+    <transition name="tts-dock-slide">
+      <div v-if="isTtsActive" class="tts-player-dock" role="region" aria-label="语音朗读播放控制器">
+        <div class="tts-player-content">
+          <!-- 左侧：书籍与段落进度 -->
+          <div class="tts-info-section">
+            <div class="tts-book-title" :title="currentBook?.name">{{ currentBook?.name }}</div>
+            <div class="tts-chapter-title" :title="currentChapterTitle">
+              {{ currentChapterTitle }} · 第 {{ ttsParaIndex + 1 }}/{{ paragraphs.length || 1 }} 句
+            </div>
+          </div>
+
+          <!-- 中间：核心播放与前后跳步控制 -->
+          <div class="tts-controls-section">
+            <!-- 上一章 -->
+            <button class="tts-btn tts-btn-sm" :disabled="chapterIndex <= 0" @click="ttsPrevChapter" title="上一章">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/>
+              </svg>
+            </button>
+
+            <!-- 上一段/句 -->
+            <button class="tts-btn tts-btn-md" :disabled="ttsParaIndex <= 0" @click="ttsPrevPara" title="上一句">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="15 18 9 12 15 6"/>
+              </svg>
+            </button>
+
+            <!-- 播放 / 暂停 (核心大按钮) -->
+            <button class="tts-btn tts-btn-play" @click="toggleTtsPlay" :title="isTtsPlaying ? '暂停朗读 (空格键)' : '开始朗读 (空格键)'">
+              <svg v-if="isTtsPlaying" width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="6" y="4" width="4" height="16" rx="1"/>
+                <rect x="14" y="4" width="4" height="16" rx="1"/>
+              </svg>
+              <svg v-else width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+                <polygon points="5 3 19 12 5 21 5 3"/>
+              </svg>
+            </button>
+
+            <!-- 下一段/句 -->
+            <button class="tts-btn tts-btn-md" :disabled="ttsParaIndex >= paragraphs.length - 1 && chapterIndex >= chapters.length - 1" @click="ttsNextPara" title="下一句">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="9 18 15 12 9 6"/>
+              </svg>
+            </button>
+
+            <!-- 下一章 -->
+            <button class="tts-btn tts-btn-sm" :disabled="chapterIndex >= chapters.length - 1" @click="ttsNextChapter" title="下一章">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/>
+              </svg>
+            </button>
+          </div>
+
+          <!-- 右侧：语速调节、音色选择、定时关闭、关闭退出 -->
+          <div class="tts-actions-section">
+            <!-- 语速快捷切换 -->
+            <el-popover trigger="click" placement="top" width="220" popper-class="tts-popover">
+              <template #reference>
+                <button class="tts-badge-btn" title="调节朗读语速">{{ ttsRate }}x 语速</button>
+              </template>
+              <div class="tts-popover-panel">
+                <div class="popover-title">语速倍率</div>
+                <div class="tts-rate-grid">
+                  <button
+                    v-for="r in [0.75, 1.0, 1.25, 1.5, 1.75, 2.0]"
+                    :key="r"
+                    class="tts-chip-btn"
+                    :class="{ active: ttsRate === r }"
+                    @click="setTtsRate(r)"
+                  >
+                    {{ r }}x
+                  </button>
+                </div>
+              </div>
+            </el-popover>
+
+            <!-- 音色/发音人选择 -->
+            <el-popover trigger="click" placement="top" width="280" popper-class="tts-popover">
+              <template #reference>
+                <button class="tts-badge-btn voice-btn" title="选择发音人 / 音色">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
+                  </svg>
+                  <span>{{ currentVoiceName }}</span>
+                </button>
+              </template>
+              <div class="tts-popover-panel">
+                <div class="popover-title">发音人 / 音色</div>
+                <div class="tts-voice-list">
+                  <div
+                    v-for="v in chineseVoices"
+                    :key="v.voiceURI"
+                    class="tts-voice-item"
+                    :class="{ active: ttsVoiceUri === v.voiceURI }"
+                    @click="setTtsVoice(v.voiceURI)"
+                  >
+                    <span class="voice-name">{{ cleanVoiceName(v.name) }}</span>
+                    <span v-if="v.lang" class="voice-lang">{{ v.lang }}</span>
+                  </div>
+                  <div v-if="!chineseVoices.length" class="voice-empty">未探测到中文语音包，使用系统默认音色</div>
+                </div>
+              </div>
+            </el-popover>
+
+            <!-- 睡眠定时关闭 -->
+            <el-popover trigger="click" placement="top" width="220" popper-class="tts-popover">
+              <template #reference>
+                <button class="tts-badge-btn" :class="{ highlight: ttsSleepTimer !== null }" title="定时关闭 / 睡眠模式">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+                  </svg>
+                  <span>{{ sleepTimerLabel }}</span>
+                </button>
+              </template>
+              <div class="tts-popover-panel">
+                <div class="popover-title">定时关闭 (睡眠模式)</div>
+                <div class="tts-sleep-list">
+                  <button
+                    v-for="opt in [
+                      { label: '不定时', val: null },
+                      { label: '15 分钟', val: 15 },
+                      { label: '30 分钟', val: 30 },
+                      { label: '45 分钟', val: 45 },
+                      { label: '60 分钟', val: 60 },
+                      { label: '读完本章', val: 'chapter' }
+                    ]"
+                    :key="String(opt.val)"
+                    class="tts-sleep-item"
+                    :class="{ active: ttsSleepTimer === opt.val }"
+                    @click="setTtsSleepTimer(opt.val as any)"
+                  >
+                    <span>{{ opt.label }}</span>
+                    <span v-if="ttsSleepTimer === opt.val && typeof ttsSleepRemaining === 'number' && ttsSleepRemaining > 0" class="sleep-countdown">
+                      剩余 {{ Math.ceil(ttsSleepRemaining / 60) }}m
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </el-popover>
+
+            <!-- 关闭退出 TTS -->
+            <button class="tts-close-btn" @click="closeTts" title="退出语音朗读">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </transition>
   </div>
 </template>
 
@@ -860,14 +1024,304 @@ const currentChapterTitle = computed(() =>
   chapters.value[chapterIndex.value]?.title || ''
 )
 
-const rendered = computed(() => {
-  if (!content.value) return ''
+const paragraphs = computed(() => {
+  if (!content.value) return []
   return content.value
     .split('\n')
-    .filter((p) => p.trim())
-    .map((p) => `<p>${p}</p>`)
-    .join('')
+    .map((p) => p.trim())
+    .filter(Boolean)
 })
+
+// ── 语音朗读 (TTS) 引擎状态与控制 ────────────────────────
+const isTtsSupported = typeof window !== 'undefined' && 'speechSynthesis' in window
+const isTtsActive = ref(false)
+const isTtsPlaying = ref(false)
+const ttsParaIndex = ref(0)
+const ttsRate = ref(Number(localStorage.getItem('reader_tts_rate')) || 1.0)
+const ttsPitch = ref(1.0)
+const ttsVoiceUri = ref(localStorage.getItem('reader_tts_voice') || '')
+const allVoices = ref<SpeechSynthesisVoice[]>([])
+const ttsSleepTimer = ref<number | 'chapter' | null>(null)
+const ttsSleepRemaining = ref<number>(0)
+let sleepInterval: number | null = null
+let currentUtterance: SpeechSynthesisUtterance | null = null
+
+function loadVoices() {
+  if (!isTtsSupported) return
+  const list = window.speechSynthesis.getVoices()
+  if (list && list.length) {
+    allVoices.value = list
+    if (!ttsVoiceUri.value) {
+      const preferred = list.find(v => 
+        (v.lang.includes('zh') || v.lang.includes('cmn') || v.lang.includes('Chinese')) &&
+        (v.name.includes('Natural') || v.name.includes('Xiaoxiao') || v.name.includes('Yunxi') || v.name.includes('Online'))
+      ) || list.find(v => v.lang.startsWith('zh') || v.lang.includes('Chinese'))
+      if (preferred) {
+        ttsVoiceUri.value = preferred.voiceURI
+      } else if (list[0]) {
+        ttsVoiceUri.value = list[0].voiceURI
+      }
+    }
+  }
+}
+
+const chineseVoices = computed(() => {
+  return allVoices.value.filter(
+    v => v.lang.startsWith('zh') || v.lang.includes('Chinese') || v.lang.includes('cmn') || v.name.includes('Chinese')
+  )
+})
+
+const currentVoiceName = computed(() => {
+  const v = allVoices.value.find(x => x.voiceURI === ttsVoiceUri.value)
+  if (!v) return '默认音色'
+  return cleanVoiceName(v.name)
+})
+
+function cleanVoiceName(name: string): string {
+  return name
+    .replace(/Microsoft\s+/i, '')
+    .replace(/Online\s*\(Natural\)/i, '(自然)')
+    .replace(/\s*-\s*Chinese.*$/i, '')
+    .replace(/Google\s+/i, 'Google ')
+    .trim()
+}
+
+const sleepTimerLabel = computed(() => {
+  if (ttsSleepTimer.value === 'chapter') return '读完本章'
+  if (typeof ttsSleepTimer.value === 'number') {
+    if (ttsSleepRemaining.value > 0) {
+      const m = Math.ceil(ttsSleepRemaining.value / 60)
+      return `${m}m 关`
+    }
+    return `${ttsSleepTimer.value}m`
+  }
+  return '定时'
+})
+
+function setTtsSleepTimer(val: number | 'chapter' | null) {
+  ttsSleepTimer.value = val
+  if (sleepInterval) clearInterval(sleepInterval)
+  if (typeof val === 'number') {
+    ttsSleepRemaining.value = val * 60
+    sleepInterval = window.setInterval(() => {
+      if (ttsSleepRemaining.value > 0) {
+        ttsSleepRemaining.value--
+        if (ttsSleepRemaining.value <= 0) {
+          closeTts()
+          ElMessage.info('睡眠定时时间已到，已自动停止朗读')
+        }
+      }
+    }, 1000)
+    ElMessage.success(`已设置 ${val} 分钟后停止朗读`)
+  } else if (val === 'chapter') {
+    ElMessage.success('已设置读完当前章节后停止朗读')
+  } else {
+    ElMessage.info('已取消定时关闭')
+  }
+}
+
+function stopTtsSpeech() {
+  if (isTtsSupported) {
+    window.speechSynthesis.cancel()
+  }
+  currentUtterance = null
+}
+
+function speakPara(index: number) {
+  if (!isTtsSupported) {
+    ElMessage.warning('当前浏览器不支持语音合成 (Web Speech API)')
+    return
+  }
+  if (!paragraphs.value.length) return
+
+  if (index < 0 || index >= paragraphs.value.length) {
+    if (ttsSleepTimer.value === 'chapter') {
+      isTtsPlaying.value = false
+      isTtsActive.value = false
+      stopTtsSpeech()
+      ElMessage.info('本章已朗读完毕，定时关闭')
+      return
+    }
+    if (chapterIndex.value < chapters.value.length - 1) {
+      goToChapter(chapterIndex.value + 1)
+      const unwatch = watch(content, (newContent) => {
+        if (newContent) {
+          unwatch()
+          nextTick(() => {
+            ttsParaIndex.value = 0
+            speakPara(0)
+          })
+        }
+      })
+    } else {
+      isTtsPlaying.value = false
+      stopTtsSpeech()
+      ElMessage.info('全书已朗读完毕')
+    }
+    return
+  }
+
+  stopTtsSpeech()
+  ttsParaIndex.value = index
+  isTtsPlaying.value = true
+
+  nextTick(() => {
+    const el = document.getElementById(`chapter-p-${index}`)
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  })
+
+  const textToSpeak = paragraphs.value[index]
+  if (!textToSpeak) {
+    speakPara(index + 1)
+    return
+  }
+
+  const utter = new SpeechSynthesisUtterance(textToSpeak)
+  utter.rate = ttsRate.value
+  utter.pitch = ttsPitch.value
+  if (ttsVoiceUri.value) {
+    const selectedVoice = allVoices.value.find(v => v.voiceURI === ttsVoiceUri.value)
+    if (selectedVoice) utter.voice = selectedVoice
+  }
+
+  utter.onend = () => {
+    if (isTtsPlaying.value && isTtsActive.value) {
+      speakPara(index + 1)
+    }
+  }
+
+  utter.onerror = (e) => {
+    if (e.error !== 'canceled' && e.error !== 'interrupted') {
+      if (isTtsPlaying.value && isTtsActive.value) {
+        speakPara(index + 1)
+      }
+    }
+  }
+
+  currentUtterance = utter
+  window.speechSynthesis.speak(utter)
+  updateMediaSession()
+}
+
+function onParaClick(pIdx: number) {
+  if (isTtsActive.value) {
+    speakPara(pIdx)
+  }
+}
+
+function toggleTtsActive() {
+  if (isTtsActive.value) {
+    toggleTtsPlay()
+  } else {
+    isTtsActive.value = true
+    speakPara(ttsParaIndex.value || 0)
+  }
+}
+
+function toggleTtsPlay() {
+  if (!isTtsActive.value) {
+    isTtsActive.value = true
+    speakPara(ttsParaIndex.value || 0)
+    return
+  }
+
+  if (isTtsPlaying.value) {
+    isTtsPlaying.value = false
+    stopTtsSpeech()
+  } else {
+    isTtsPlaying.value = true
+    speakPara(ttsParaIndex.value || 0)
+  }
+  updateMediaSession()
+}
+
+function closeTts() {
+  isTtsActive.value = false
+  isTtsPlaying.value = false
+  stopTtsSpeech()
+  if (sleepInterval) clearInterval(sleepInterval)
+  ttsSleepTimer.value = null
+  updateMediaSession()
+}
+
+function ttsPrevPara() {
+  if (ttsParaIndex.value > 0) {
+    speakPara(ttsParaIndex.value - 1)
+  }
+}
+
+function ttsNextPara() {
+  if (ttsParaIndex.value < paragraphs.value.length - 1) {
+    speakPara(ttsParaIndex.value + 1)
+  } else if (chapterIndex.value < chapters.value.length - 1) {
+    ttsNextChapter()
+  }
+}
+
+function ttsPrevChapter() {
+  if (chapterIndex.value > 0) {
+    goToChapter(chapterIndex.value - 1)
+    const unwatch = watch(content, (newContent) => {
+      if (newContent) {
+        unwatch()
+        nextTick(() => {
+          ttsParaIndex.value = 0
+          speakPara(0)
+        })
+      }
+    })
+  }
+}
+
+function ttsNextChapter() {
+  if (chapterIndex.value < chapters.value.length - 1) {
+    goToChapter(chapterIndex.value + 1)
+    const unwatch = watch(content, (newContent) => {
+      if (newContent) {
+        unwatch()
+        nextTick(() => {
+          ttsParaIndex.value = 0
+          speakPara(0)
+        })
+      }
+    })
+  }
+}
+
+function setTtsRate(rate: number) {
+  ttsRate.value = rate
+  try { localStorage.setItem('reader_tts_rate', String(rate)) } catch {}
+  if (isTtsPlaying.value) {
+    speakPara(ttsParaIndex.value)
+  }
+}
+
+function setTtsVoice(voiceUri: string) {
+  ttsVoiceUri.value = voiceUri
+  try { localStorage.setItem('reader_tts_voice', voiceUri) } catch {}
+  if (isTtsPlaying.value) {
+    speakPara(ttsParaIndex.value)
+  }
+}
+
+function updateMediaSession() {
+  if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: currentChapterTitle.value,
+      artist: currentBook.value?.author || 'Legado Web',
+      album: currentBook.value?.name || '开源阅读',
+      artwork: currentBook.value?.cover ? [{ src: currentBook.value.cover }] : [],
+    })
+    navigator.mediaSession.playbackState = isTtsPlaying.value ? 'playing' : 'paused'
+    navigator.mediaSession.setActionHandler('play', () => { toggleTtsPlay() })
+    navigator.mediaSession.setActionHandler('pause', () => { toggleTtsPlay() })
+    navigator.mediaSession.setActionHandler('previoustrack', () => { ttsPrevChapter() })
+    navigator.mediaSession.setActionHandler('nexttrack', () => { ttsNextChapter() })
+  } catch {}
+}
 
 // ── 起点风格主题配置（精准复刻起点官方阅读器背景色板）──
 type ThemeId = 'qidian' | 'cream' | 'eye' | 'blue' | 'pink' | 'white' | 'night'
@@ -1356,6 +1810,12 @@ function onKeyDown(e: KeyboardEvent) {
     }
     return
   }
+  // TTS 状态下空格键控制播放/暂停
+  if (isTtsActive.value && e.code === 'Space') {
+    e.preventDefault()
+    toggleTtsPlay()
+    return
+  }
   if (e.key === 'ArrowLeft') {
     prevChapter()
   } else if (e.key === 'ArrowRight') {
@@ -1366,10 +1826,16 @@ function onKeyDown(e: KeyboardEvent) {
 onMounted(() => {
   initBookAndChapters()
   window.addEventListener('keydown', onKeyDown)
+  loadVoices()
+  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    window.speechSynthesis.onvoiceschanged = loadVoices
+  }
 })
 
 onUnmounted(() => {
   stopSourceSearch()
+  stopTtsSpeech()
+  if (sleepInterval) clearInterval(sleepInterval)
   window.removeEventListener('keydown', onKeyDown)
 })
 </script>
@@ -2617,5 +3083,352 @@ onUnmounted(() => {
     max-width: 400px;
     padding: 20px 16px;
   }
+
+  .tts-player-dock {
+    bottom: calc(68px + env(safe-area-inset-bottom, 0px));
+    width: calc(100% - 24px);
+  }
+
+  .tts-player-content {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 10px 14px;
+  }
+
+  .tts-info-section {
+    width: 100%;
+    order: 1;
+  }
+
+  .tts-controls-section {
+    order: 2;
+    margin: 0 auto;
+  }
+
+  .tts-actions-section {
+    order: 3;
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
+/* ─── 语音朗读 (TTS) 动画与样式 ──────────────────────────── */
+.tts-wave-icon {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 18px;
+  width: 18px;
+  justify-content: center;
+}
+
+.wave-bar {
+  width: 3px;
+  height: 100%;
+  background-color: var(--color-accent, #c8983a);
+  border-radius: 1.5px;
+  animation: ttsWave 1.2s ease-in-out infinite alternate;
+}
+
+.wave-bar:nth-child(1) { height: 35%; animation-delay: 0.1s; }
+.wave-bar:nth-child(2) { height: 80%; animation-delay: 0.3s; }
+.wave-bar:nth-child(3) { height: 100%; animation-delay: 0.2s; }
+.wave-bar:nth-child(4) { height: 50%; animation-delay: 0.4s; }
+
+@keyframes ttsWave {
+  0% { transform: scaleY(0.3); }
+  100% { transform: scaleY(1); }
+}
+
+.chapter-para {
+  text-indent: 2em;
+  margin: 0 0 1.15em;
+  text-align: justify;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 4px 6px;
+  margin-left: -6px;
+  margin-right: -6px;
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.chapter-para:hover {
+  background: rgba(184, 134, 58, 0.04);
+}
+
+.tts-active-para {
+  background: rgba(200, 152, 58, 0.16) !important;
+  color: var(--qd-text-color) !important;
+  box-shadow: 0 0 0 1px rgba(200, 152, 58, 0.35);
+  font-weight: 500;
+}
+
+.theme-night .tts-active-para {
+  background: rgba(200, 152, 58, 0.28) !important;
+  box-shadow: 0 0 0 1px rgba(200, 152, 58, 0.5);
+}
+
+/* ─── 悬浮播放条 Dock ───────────────────────────────────── */
+.tts-player-dock {
+  position: fixed;
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(840px, calc(100vw - 32px));
+  background: var(--qd-page-bg, #ffffff);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 16px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.06);
+  z-index: 100;
+  backdrop-filter: blur(20px);
+}
+
+.theme-night .tts-player-dock {
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+}
+
+.tts-player-content {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 18px;
+  gap: 14px;
+}
+
+.tts-info-section {
+  flex: 1;
+  min-width: 0;
+}
+
+.tts-book-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--qd-text-color);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tts-chapter-title {
+  font-size: 12px;
+  color: #888;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+}
+
+.tts-controls-section {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.tts-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 50%;
+  color: var(--qd-text-color);
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.tts-btn:hover:not(:disabled) {
+  background: var(--color-accent, #c8983a);
+  color: #ffffff;
+  border-color: var(--color-accent, #c8983a);
+  transform: scale(1.06);
+}
+
+.tts-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.tts-btn-sm {
+  width: 32px;
+  height: 32px;
+}
+
+.tts-btn-md {
+  width: 36px;
+  height: 36px;
+}
+
+.tts-btn-play {
+  width: 46px;
+  height: 46px;
+  background: var(--color-accent, #c8983a);
+  color: #ffffff;
+  border: none;
+  box-shadow: 0 4px 12px rgba(200, 152, 58, 0.35);
+}
+
+.tts-btn-play:hover {
+  background: #b5852d !important;
+  color: #ffffff !important;
+  transform: scale(1.08);
+}
+
+.tts-actions-section {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.tts-badge-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.05);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  color: var(--qd-text-color);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  white-space: nowrap;
+}
+
+.tts-badge-btn:hover {
+  background: rgba(200, 152, 58, 0.12);
+  border-color: rgba(200, 152, 58, 0.35);
+  color: var(--color-accent, #c8983a);
+}
+
+.tts-badge-btn.highlight {
+  background: rgba(200, 152, 58, 0.18);
+  border-color: var(--color-accent, #c8983a);
+  color: var(--color-accent, #c8983a);
+  font-weight: 500;
+}
+
+.tts-close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: transparent;
+  border: none;
+  color: #999;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.tts-close-btn:hover {
+  background: rgba(237, 66, 75, 0.12);
+  color: #ed424b;
+}
+
+/* ─── Popover 内部面板 ───────────────────────────────────── */
+.tts-popover-panel {
+  padding: 6px;
+}
+
+.popover-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #888;
+  margin-bottom: 8px;
+  padding-left: 4px;
+}
+
+.tts-rate-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.tts-chip-btn {
+  padding: 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: rgba(0, 0, 0, 0.03);
+  font-size: 13px;
+  color: #333;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: center;
+}
+
+.tts-chip-btn.active,
+.tts-chip-btn:hover {
+  background: var(--color-accent, #c8983a);
+  color: #ffffff;
+  border-color: var(--color-accent, #c8983a);
+}
+
+.tts-voice-list,
+.tts-sleep-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.tts-voice-item,
+.tts-sleep-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #333;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  border: none;
+  background: transparent;
+  width: 100%;
+  text-align: left;
+}
+
+.tts-voice-item:hover,
+.tts-sleep-item:hover {
+  background: rgba(200, 152, 58, 0.1);
+  color: var(--color-accent, #c8983a);
+}
+
+.tts-voice-item.active,
+.tts-sleep-item.active {
+  background: rgba(200, 152, 58, 0.18);
+  color: var(--color-accent, #c8983a);
+  font-weight: 600;
+}
+
+.voice-lang,
+.sleep-countdown {
+  font-size: 11px;
+  color: #999;
+}
+
+.voice-empty {
+  font-size: 12px;
+  color: #999;
+  padding: 12px 8px;
+  text-align: center;
+}
+
+/* ─── 动画过渡 ───────────────────────────────────────────── */
+.tts-dock-slide-enter-active,
+.tts-dock-slide-leave-active {
+  transition: all 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.tts-dock-slide-enter-from,
+.tts-dock-slide-leave-to {
+  opacity: 0;
+  transform: translate(-50%, 28px);
 }
 </style>
