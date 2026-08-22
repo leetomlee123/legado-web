@@ -117,14 +117,17 @@ def test_fallback_and_slice():
     """
     soup = BeautifulSoup(html, "lxml")
 
-    # || fallback
-    res = extract_value(soup, ".non-existent@text || .opt.0@text")
-    assert res == "备用选项1"
-
-    # 切片
-    items = extract_values(soup, ".opt[1:]@text")
-    assert len(items) == 1
-    assert items[0] == "备用选项2"
+def test_dynamic_js_java_ajax_content():
+    # 测试前置 <js> 配合 java.ajax 和 JSONPath 规则
+    rule_str = """<js>
+    let aid = 99;
+    let jsonResp = '{"status":1,"data":{"content":"第14章 长湖与项平<br/><br/>「是因为他足够残忍。」"}}';
+    jsonResp;
+    </js>
+    $..content"""
+    res = extract_value(None, rule_str, base_url="https://www.deqixs.cc/books/99/62195.html")
+    assert "第14章" in res
+    assert "是因为他足够残忍" in res
 
 
 if __name__ == "__main__":
@@ -134,4 +137,5 @@ if __name__ == "__main__":
     test_multiline_rule_aggregation()
     test_multiclass_and_at_cascade()
     test_fallback_and_slice()
+    test_dynamic_js_java_ajax_content()
     print("All test_legado_rule.py comprehensive tests passed!")

@@ -421,13 +421,10 @@ def _fill_native_content(out: SourceRule, raw: dict) -> None:
     content_rule = _s(rc.get("content") or rc.get("selector"))
     if not content_rule:
         return
-    selector, text = content_rule, _s(rc.get("text")) or "text"
-    if "@" in content_rule:
-        selector, attr = content_rule.rsplit("@", 1)
-        selector, text = selector.strip(), attr.strip() or "text"
+    # 保留完整的 content 规则表达式（包括 <js>、JSONPath、{{@@}}、XPath 等）
     out.content = ContentRule(
-        selector=selector.strip(),
-        text=text,
+        selector=content_rule.strip(),
+        text=_s(rc.get("text")) or "text",
         next_content_url=_s(rc.get("nextContentUrl")),
         replace_regex=_s(rc.get("replaceRegex")),
         web_js=_s(rc.get("webJs")),
@@ -1097,17 +1094,72 @@ def eval_js_snippet(code: str, result: str = "", base_url: str = "") -> str:
                 pass
         return val
 
-    # 2. 复杂 JS 代码使用 Node.js 执行
+    # 2. 复杂 JS 代码使用 Node.js 执行（内置 java.ajax, java.md5Encode, java.base64Encode, etc.）
     import subprocess
     script = f"""
+    const http = require("http");
+    const https = require("https");
+    const crypto = require("crypto");
+    const execSync = require("child_process").execSync;
+
+    const baseUrl = {json.dumps(base_url)};
     let result = {json.dumps(result)};
-    let baseUrl = {json.dumps(base_url)};
-    let java = {{
-        ajax: (url) => "",
-        md5Encode: (s) => s,
+
+    function javaAjax(targetUrlWithOpts) {{
+        let target = String(targetUrlWithOpts || "").trim();
+        let headers = {{
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "*/*"
+        }};
+        if (target.includes(",") && (target.includes("{{") || target.includes("headers"))) {{
+            let idx = target.indexOf(",");
+            let rawOpts = target.substring(idx + 1).trim();
+            target = target.substring(0, idx).trim();
+            try {{
+                let parsedOpts = JSON.parse(rawOpts);
+                if (parsedOpts && parsedOpts.headers) Object.assign(headers, parsedOpts.headers);
+            }} catch(e) {{}}
+        }}
+        if (baseUrl) {{
+            try {{
+                let bHost = new URL(baseUrl).host;
+                let tUrl = new URL(target);
+                let tHost = tUrl.host;
+                if (bHost && tHost && bHost !== tHost) {{
+                    let bMain = bHost.split(".").slice(-2).join(".");
+                    let tMain = tHost.split(".").slice(-2).join(".");
+                    let bName = bHost.replace(/^(www|m|wap|app)\\./, "").split(".")[0];
+                    let tName = tHost.replace(/^(www|m|wap|app)\\./, "").split(".")[0];
+                    if (bName === tName || bMain === tMain) {{
+                        target = target.replace(tHost, bHost);
+                    }}
+                }}
+            }} catch(e) {{}}
+        }}
+        if (!headers["Referer"] && !headers["referer"] && baseUrl) {{
+            headers["Referer"] = baseUrl;
+        }}
+        
+        let headerArgs = Object.entries(headers).map(([k, v]) => `-H "${{k}}: ${{v}}"`).join(" ");
+        let cmd = `curl -s -L --max-time 15 ${{headerArgs}} "${{target}}"`;
+        try {{
+            let outBuf = execSync(cmd);
+            return outBuf.toString("utf-8");
+        }} catch(e) {{
+            return "";
+        }}
+    }}
+
+    const java = {{
+        ajax: (u) => javaAjax(u),
+        md5Encode: (s) => crypto.createHash("md5").update(String(s||"")).digest("hex"),
+        base64Encode: (s) => Buffer.from(String(s||"")).toString("base64"),
+        base64Decode: (s) => Buffer.from(String(s||""), "base64").toString("utf-8"),
         toNumChapter: (s) => String(s || ""),
         getString: (s) => String(s || ""),
+        refreshTocUrl: () => "",
     }};
+
     try {{
         let out = eval({json.dumps(code)});
         if (out === undefined) out = result;
@@ -1117,13 +1169,13 @@ def eval_js_snippet(code: str, result: str = "", base_url: str = "") -> str:
     }}
     """
     try:
-        p = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=2.0)
+        p = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=18.0)
         return p.stdout
     except Exception:
         return result
 
 
-def extract_values(el: Tag | dict | list | None, rule: str, base_url: str = "") -> list[str]:
+def extract_values(el: Tag | dict | list | str | None, rule: str, base_url: str = "") -> list[str]:
     """
     通用值提取引擎（完全兼容 Legado 阅读 3.0 AnalyzeRule）：
     1. {{@@...}} 宏模板插值
@@ -1132,13 +1184,30 @@ def extract_values(el: Tag | dict | list | None, rule: str, base_url: str = "") 
     4. Legado 级联属性选择器 (id.info@tag.p.0@text, class.next@tag.a@href, onclick##...##$1, option@value)
     5. 多行规则合并与 ## 正则替换 ($1, $2 分组捕获引用)
     """
-    if el is None:
-        return []
     rule = (rule or "").strip()
     if not rule:
         return []
 
-    # 1. 提取与剥离尾部或内嵌的 JS 代码 (<js>...</js> 或 @js:...)
+    # 1. 优先处理前置 JS 代码块（例如 <js>...java.ajax...</js>\n$..content）
+    js_prefix_m = re.match(r"^\s*<js>(.*?)</js>\s*(.*)$", rule, re.DOTALL)
+    if js_prefix_m:
+        js_code = js_prefix_m.group(1).strip()
+        post_rule = js_prefix_m.group(2).strip()
+        js_res = eval_js_snippet(js_code, "", base_url)
+        if post_rule:
+            return extract_values(js_res, post_rule, base_url)
+        return [js_res] if js_res else []
+
+    # 处理纯前置 @js: 规则
+    if rule.startswith("@js:") and "\n" not in rule[:6]:
+        js_code = rule[4:].strip()
+        js_res = eval_js_snippet(js_code, "", base_url)
+        return [js_res] if js_res else []
+
+    if el is None:
+        return []
+
+    # 提取与剥离尾部或内嵌的 JS 代码 (<js>...</js> 或 @js:...)
     js_code = None
     if "<js>" in rule and "</js>" in rule:
         m_js = re.search(r"<js>(.*?)</js>", rule, re.DOTALL)
@@ -1928,6 +1997,7 @@ def crawl_content_single_page(
     source_id: int | str = "",
     book_name: str = "",
     chapter_title: str = "",
+    chapter_url: str = "",
 ) -> list[str]:
     """提取单页正文段落列表。"""
     src_label = f"{source_name} (ID:{source_id})" if (source_name or source_id) else "正文解析"
@@ -1945,16 +2015,36 @@ def crawl_content_single_page(
         text = soup.get_text(separator="\n", strip=True)
         return [p.strip() for p in text.split("\n") if p.strip()]
 
-    root = soup if isinstance(soup, Tag) else soup
-    elems = safe_select(root, rule.selector)
-
     paragraphs = []
-    text_rule = _or_default(rule.text, "text")
-    if elems:
-        for el in elems:
-            p_text = extract_value(el, text_rule, "")
-            if p_text:
-                paragraphs.append(p_text)
+
+    # 优先：使用全功能 Legado 规则引擎 (支持 <js> java.ajax, JSONPath, {{@@}}, ##, XPath, etc.)
+    rule_expr = rule.selector
+    try:
+        extracted = extract_value(soup, rule_expr, chapter_url)
+        if extracted:
+            if "<br" in extracted or "<p" in extracted or "<div" in extracted:
+                sub_soup = BeautifulSoup(extracted, "html.parser")
+                for br in sub_soup.find_all(["br", "p"]):
+                    br.replace_with("\n" + br.get_text())
+                raw_text = sub_soup.get_text(separator="\n", strip=True)
+            else:
+                raw_text = extracted
+            cand_paras = [p.strip() for p in raw_text.split("\n") if p.strip()]
+            if len(cand_paras) >= 2 or (cand_paras and len("".join(cand_paras)) > 30):
+                paragraphs = cand_paras
+    except Exception as e:
+        logger.warning("[正文解析] [%s] %s主规则执行异常: %s", src_label, title_label, e)
+
+    # 次选：如果 extract_value 未命中，尝试常规 DOM 选择器提取
+    if not paragraphs:
+        root = soup if isinstance(soup, Tag) else soup
+        elems = safe_select(root, rule.selector)
+        text_rule = _or_default(rule.text, "text")
+        if elems:
+            for el in elems:
+                p_text = extract_value(el, text_rule, chapter_url)
+                if p_text:
+                    paragraphs.append(p_text)
 
     # 保底机制 1：如果规则指定了 p 标签选择器（如 #rtext p），但容器内直接包含纯文本或换行，尝试直接从容器本身提取
     if not paragraphs and rule.selector and " p" in rule.selector:
@@ -1990,6 +2080,7 @@ def crawl_content(
     source_id: int | str = "",
     book_name: str = "",
     chapter_title: str = "",
+    chapter_url: str = "",
 ) -> str:
     paragraphs = crawl_content_single_page(
         html,
@@ -1998,6 +2089,7 @@ def crawl_content(
         source_id=source_id,
         book_name=book_name,
         chapter_title=chapter_title,
+        chapter_url=chapter_url,
     )
     content = "\n".join(paragraphs)
     if rule and rule.replace_regex:
@@ -2177,6 +2269,7 @@ def fetch_web_chapter(book: dict, chapter_url: str, chapter_title: str = "") -> 
             source_id=src["id"],
             book_name=book_name,
             chapter_title=chapter_title,
+            chapter_url=cur_url,
         )
 
         # 若多页分页在后续页顶部重复了章节名（如“第一章 ... (第2页)”），剔除重复标题段落
