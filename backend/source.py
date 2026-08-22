@@ -1042,12 +1042,95 @@ def normalize_extract_rule(rule: str, default: str) -> str:
     return r
 
 
-def extract_values(el: Tag | None, rule: str, base_url: str = "") -> list[str]:
+def fix_dollar_backref(r_str: str) -> str:
+    """把 $1, $2 转换为 Python re.sub 的 \\g<1>, \\g<2> 反向引用。"""
+    out_r = ""
+    k = 0
+    while k < len(r_str):
+        if r_str[k] == "$" and k + 1 < len(r_str) and r_str[k + 1].isdigit():
+            m = k + 1
+            while m < len(r_str) and r_str[m].isdigit():
+                m += 1
+            num = r_str[k + 1 : m]
+            out_r += "\\g<" + num + ">"
+            k = m
+        else:
+            out_r += r_str[k]
+            k += 1
+    return out_r
+
+
+def eval_js_snippet(code: str, result: str = "", base_url: str = "") -> str:
+    """执行书源规则中的 JavaScript 代码块。优先使用纯 Python 快速链式替换，复杂代码回退到 Node.js 执行。"""
+    if not code:
+        return result
+    code = code.strip()
+
+    # 1. 快速处理 result.replace(...) 纯正则链式替换
+    if re.match(r"^result(?:\s*\.replace\s*\([^()]+\))*\s*;?$", code, re.DOTALL):
+        val = result
+        for match in re.finditer(
+            r"\.replace\s*\(\s*(/(?:\\/|[^/])+/[gimyus]*|'[^']*'|\"[^\"]*\")\s*,\s*('[^\']*'|\"[^\"]*\"|[^\s,)]+)\s*\)",
+            code,
+        ):
+            pat_raw, rep_raw = match.group(1), match.group(2)
+            if pat_raw.startswith("/"):
+                slash_idx = pat_raw.rfind("/")
+                pat_body = pat_raw[1:slash_idx]
+                flags_str = pat_raw[slash_idx + 1 :]
+                flags = 0
+                if "i" in flags_str: flags |= re.IGNORECASE
+                if "s" in flags_str: flags |= re.DOTALL
+                if "m" in flags_str: flags |= re.MULTILINE
+            else:
+                pat_body = pat_raw[1:-1]
+                flags = 0
+
+            if (rep_raw.startswith("'") and rep_raw.endswith("'")) or (rep_raw.startswith('"') and rep_raw.endswith('"')):
+                rep_body = rep_raw[1:-1]
+            else:
+                rep_body = rep_raw
+            rep_body = fix_dollar_backref(rep_body)
+            try:
+                val = re.sub(pat_body, rep_body, val, flags=flags)
+            except Exception:
+                pass
+        return val
+
+    # 2. 复杂 JS 代码使用 Node.js 执行
+    import subprocess
+    script = f"""
+    let result = {json.dumps(result)};
+    let baseUrl = {json.dumps(base_url)};
+    let java = {{
+        ajax: (url) => "",
+        md5Encode: (s) => s,
+        toNumChapter: (s) => String(s || ""),
+        getString: (s) => String(s || ""),
+    }};
+    try {{
+        let out = eval({json.dumps(code)});
+        if (out === undefined) out = result;
+        process.stdout.write(typeof out === "object" ? JSON.stringify(out) : String(out));
+    }} catch(e) {{
+        process.stdout.write(String(result));
+    }}
     """
-    通用值提取引擎，支持：
-    1. XPath (//a[...] / /select/option/...)
-    2. Legado 级联属性选择器 (id.info@tag.p.0@text, class.next@tag.a@href, onclick##...##$1, option@value)
-    3. 多值列表展开与 ## 正则替换及 $1 分组反向引用
+    try:
+        p = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=2.0)
+        return p.stdout
+    except Exception:
+        return result
+
+
+def extract_values(el: Tag | dict | list | None, rule: str, base_url: str = "") -> list[str]:
+    """
+    通用值提取引擎（完全兼容 Legado 阅读 3.0 AnalyzeRule）：
+    1. {{@@...}} 宏模板插值
+    2. <js>...</js> 与 @js:... 脚本执行
+    3. XPath (//... / /...) 与 JSONPath (@json:... / $....)
+    4. Legado 级联属性选择器 (id.info@tag.p.0@text, class.next@tag.a@href, onclick##...##$1, option@value)
+    5. 多行规则合并与 ## 正则替换 ($1, $2 分组捕获引用)
     """
     if el is None:
         return []
@@ -1055,7 +1138,98 @@ def extract_values(el: Tag | None, rule: str, base_url: str = "") -> list[str]:
     if not rule:
         return []
 
-    # 1. XPath 支持 (// 或 /)
+    # 1. 提取与剥离尾部或内嵌的 JS 代码 (<js>...</js> 或 @js:...)
+    js_code = None
+    if "<js>" in rule and "</js>" in rule:
+        m_js = re.search(r"<js>(.*?)</js>", rule, re.DOTALL)
+        if m_js:
+            js_code = m_js.group(1).strip()
+            rule = (rule[: m_js.start()] + rule[m_js.end() :]).strip()
+    elif "@js:" in rule:
+        idx = rule.find("@js:")
+        js_code = rule[idx + 4 :].strip()
+        rule = rule[:idx].strip()
+
+    # 2. 处理 {{@@...}} 宏模板插值
+    if "{{@@" in rule:
+        last_brace = rule.rfind("}}")
+        suffix = rule[last_brace + 2 :]
+        prefix = rule[: last_brace + 2]
+
+        post_replacements = []
+        if "##" in suffix:
+            post_parts = suffix.split("##")
+            prefix += post_parts[0]
+            post_replacements = post_parts[1:]
+
+        def _macro_sub(m):
+            sub_r = m.group(1).strip()
+            return extract_value(el, sub_r, base_url)
+
+        val = re.sub(r"\{\{@@(.*?)}}", _macro_sub, prefix)
+        val = val.replace("{{'\\n'+'​'}}", "\n​").replace('{{"\\n"+"​"}}', "\n​")
+        val = re.sub(r"\{\{'([^']*)'\}\}", r"\1", val)
+
+        for i in range(0, len(post_replacements), 2):
+            pat = post_replacements[i].strip()
+            if not pat:
+                continue
+            rep = post_replacements[i + 1] if i + 1 < len(post_replacements) else ""
+            rep = fix_dollar_backref(rep)
+            try:
+                val = re.sub(pat, rep, val)
+            except Exception:
+                pass
+
+        if js_code:
+            val = eval_js_snippet(js_code, val, base_url)
+
+        val = val.strip()
+        return [val] if val else []
+
+    # 3. JSONPath 支持 (@json:... 或 $. 或 dict/list 数据源)
+    if isinstance(el, (dict, list)) or rule.startswith("@json:") or rule.startswith("@JSon:") or rule.startswith("$."):
+        try:
+            from jsonpath_ng.ext import parse as jp_parse
+            clean_jp = rule
+            if clean_jp.lower().startswith("@json:"):
+                clean_jp = clean_jp[6:].strip()
+            # 分离 ## 正则替换
+            jp_parts = clean_jp.split("##")
+            jp_expr = jp_parts[0].strip()
+            jp_reps = jp_parts[1:]
+
+            target_data = el
+            if isinstance(el, str):
+                try:
+                    target_data = json.loads(el)
+                except Exception:
+                    target_data = el
+
+            if isinstance(target_data, (dict, list)):
+                if not jp_expr.startswith("$.") and not jp_expr.startswith("$"):
+                    jp_expr = "$." + jp_expr
+                expr = jp_parse(jp_expr)
+                matches = [m.value for m in expr.find(target_data)]
+                out = []
+                for v in matches:
+                    s_v = str(v).strip() if v is not None else ""
+                    if s_v:
+                        for i in range(0, len(jp_reps), 2):
+                            p = jp_reps[i].strip()
+                            if not p: continue
+                            r = jp_reps[i + 1] if i + 1 < len(jp_reps) else ""
+                            s_v = re.sub(p, fix_dollar_backref(r), s_v)
+                        if js_code:
+                            s_v = eval_js_snippet(js_code, s_v, base_url)
+                        if s_v:
+                            out.append(s_v)
+                if out:
+                    return out
+        except Exception:
+            pass
+
+    # 4. XPath 支持
     if rule.startswith("//") or (rule.startswith("/") and not rule.startswith("/@")):
         try:
             import lxml.html
@@ -1074,11 +1248,28 @@ def extract_values(el: Tag | None, rule: str, base_url: str = "") -> list[str]:
                     if s:
                         out.append(s)
             if out:
+                if js_code:
+                    out = [eval_js_snippet(js_code, o, base_url) for o in out]
                 return out
         except Exception:
             pass
 
-    # 分离基础规则与 ## 正则替换部分
+    # 5. 多行规则合并 (若无 {{@@)
+    if "\n" in rule:
+        lines = [l.strip() for l in rule.split("\n") if l.strip()]
+        if len(lines) > 1 and not rule.startswith("@"):
+            results = []
+            for line in lines:
+                vals = extract_values(el, line, base_url)
+                if vals:
+                    results.extend(vals)
+            if results:
+                joined = "\n".join(results).strip()
+                if js_code:
+                    joined = eval_js_snippet(js_code, joined, base_url)
+                return [joined] if joined else []
+
+    # 6. 分离基础规则与 ## 正则替换部分
     parts = rule.split("##")
     base_rule = parts[0].strip()
     replacements = parts[1:]
@@ -1088,10 +1279,12 @@ def extract_values(el: Tag | None, rule: str, base_url: str = "") -> list[str]:
         for branch in base_rule.split("||"):
             res = extract_values(el, branch.strip(), base_url)
             if res:
+                if js_code:
+                    res = [eval_js_snippet(js_code, r, base_url) for r in res]
                 return res
         return []
 
-    # 解析 @ 分段链路（例如 id.info@tag.p.0@text 或 class.next@tag.a@href 或 onclick 或 option@value）
+    # 解析 @ 分段链路
     segments = [s.strip() for s in base_rule.split("@") if s.strip()] if "@" in base_rule else ([base_rule] if base_rule else [])
 
     attr = "text"
@@ -1102,7 +1295,7 @@ def extract_values(el: Tag | None, rule: str, base_url: str = "") -> list[str]:
     elif len(segments) == 1:
         seg = segments[0]
         seg_lower = seg.lower()
-        if el.has_attr(seg):
+        if hasattr(el, "has_attr") and el.has_attr(seg):
             attr = seg
         elif seg_lower in ("text", "textn", "textnodes", "owntext", "html", "href", "src", "value", "onclick", "title", "alt", "id", "class", "content", "data-src", "data-url"):
             attr = seg_lower
@@ -1112,7 +1305,7 @@ def extract_values(el: Tag | None, rule: str, base_url: str = "") -> list[str]:
         attr = segments[-1]
         selector_chain = segments[:-1]
 
-    current_nodes = [el]
+    current_nodes = [el] if isinstance(el, Tag) else []
     for sel in selector_chain:
         next_nodes = []
         for node in current_nodes:
@@ -1143,28 +1336,14 @@ def extract_values(el: Tag | None, rule: str, base_url: str = "") -> list[str]:
             if not pattern:
                 continue
             repl = replacements[i + 1] if i + 1 < len(replacements) else ""
-            # 将 $1, $2 转换为 \g<1>, \g<2>
-            def _fix_dollar(r_str: str) -> str:
-                out_r = ""
-                k = 0
-                while k < len(r_str):
-                    if r_str[k] == "$" and k + 1 < len(r_str) and r_str[k + 1].isdigit():
-                        m = k + 1
-                        while m < len(r_str) and r_str[m].isdigit():
-                            m += 1
-                        num = r_str[k + 1 : m]
-                        out_r += "\\g<" + num + ">"
-                        k = m
-                    else:
-                        out_r += r_str[k]
-                        k += 1
-                return out_r
-
-            repl = _fix_dollar(repl)
+            repl = fix_dollar_backref(repl)
             try:
                 val = re.sub(pattern, repl, val)
             except Exception:
                 pass
+
+        if js_code:
+            val = eval_js_snippet(js_code, val, base_url)
 
         val = val.strip()
         if val:
@@ -1175,7 +1354,7 @@ def extract_values(el: Tag | None, rule: str, base_url: str = "") -> list[str]:
     return out
 
 
-def extract_value(el: Tag | None, rule: str, base_url: str = "") -> str:
+def extract_value(el: Tag | dict | list | None, rule: str, base_url: str = "") -> str:
     """提取首个匹配值。"""
     vals = extract_values(el, rule, base_url)
     return vals[0] if vals else ""
