@@ -2,6 +2,39 @@
   <section class="bookcase" aria-label="我的书架">
     <!-- ── 正常模式工具栏 ───────────────────────────────────── -->
     <div v-if="!isManaging" class="toolbar">
+      <!-- 顶行：左侧「书架」标题与书本数量，右侧「批量管理」和「导入书籍」按钮（在同一行！） -->
+      <div class="toolbar-header-row">
+        <div class="toolbar-title-group">
+          <h2 class="bookcase-title">书架</h2>
+          <span v-if="books.length > 0" class="bookcase-count-tag">{{ total || books.length }}</span>
+        </div>
+
+        <div class="toolbar-actions">
+          <!-- 批量管理按钮（仅在有书时可用） -->
+          <button
+            v-if="books.length > 0"
+            id="bookcase-manage-btn"
+            class="btn-manage"
+            aria-label="管理书架"
+            @click="startManaging"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="9 11 12 14 22 4"/>
+              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+            </svg>
+            批量管理
+          </button>
+
+          <router-link to="/import" class="btn-import" id="bookcase-import-btn" aria-label="导入新书籍">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            导入书籍
+          </router-link>
+        </div>
+      </div>
+
+      <!-- 搜索框独占一行 -->
       <div class="search-wrap">
         <span class="search-icon" aria-hidden="true">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -13,34 +46,18 @@
           v-model="keyword"
           type="search"
           class="search-input"
-          placeholder="搜索书架..."
+          placeholder="搜索书架书籍或作者..."
           aria-label="搜索书架中的书籍"
           @input="onSearch"
         />
-      </div>
-
-      <div class="toolbar-actions">
-        <!-- 批量管理按钮（仅在有书时可用） -->
         <button
-          v-if="books.length > 0"
-          id="bookcase-manage-btn"
-          class="btn-manage"
-          aria-label="管理书架"
-          @click="startManaging"
+          v-if="keyword"
+          class="btn-clear-search"
+          aria-label="清空搜索"
+          @click="keyword = ''; onSearch()"
         >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="9 11 12 14 22 4"/>
-            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
-          </svg>
-          批量管理
+          ✕
         </button>
-
-        <router-link to="/import" class="btn-import" id="bookcase-import-btn" aria-label="导入新书籍">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
-          </svg>
-          导入书籍
-        </router-link>
       </div>
     </div>
 
@@ -393,18 +410,47 @@ onMounted(() => fetchBooks(true))
 /* ─── 普通模式工具栏 ──────────────────────────────────────── */
 .toolbar {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  flex-direction: column;
   gap: 16px;
-  margin-bottom: 28px;
-  flex-wrap: wrap;
+  margin-bottom: 26px;
+}
+
+.toolbar-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+}
+
+.toolbar-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bookcase-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.bookcase-count-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  background: var(--color-accent-pale);
+  color: var(--color-accent);
+  border-radius: 99px;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .search-wrap {
   position: relative;
-  flex: 1;
-  max-width: 360px;
-  min-width: 200px;
+  width: 100%;
 }
 
 .search-icon {
@@ -420,7 +466,7 @@ onMounted(() => fetchBooks(true))
 
 .search-input {
   width: 100%;
-  padding: 9px 12px 9px 38px;
+  padding: 10px 36px 10px 38px;
   border: 1.5px solid var(--color-border-subtle);
   border-radius: var(--radius-lg);
   background: var(--color-surface);
@@ -439,6 +485,24 @@ onMounted(() => fetchBooks(true))
 .search-input:focus {
   border-color: var(--color-accent);
   box-shadow: 0 0 0 3px var(--color-accent-pale);
+}
+
+.btn-clear-search {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  border: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: 4px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.btn-clear-search:hover {
+  color: var(--color-accent);
 }
 
 .toolbar-actions {
@@ -960,42 +1024,69 @@ onMounted(() => fetchBooks(true))
 /* ─── 移动端响应式适配 (<= 768px) ────────────────────────── */
 @media (max-width: 768px) {
   .bookcase {
-    padding: 16px 12px 24px;
+    padding: 14px 12px 24px;
   }
 
   .toolbar {
     margin-bottom: 16px;
-    gap: 10px;
+    gap: 12px;
   }
 
+  /* 第一行：书架标题/数量在左侧，「批量管理」和「导入书籍」在右侧，同行排列！ */
+  .toolbar-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    width: 100%;
+  }
+
+  .bookcase-title {
+    font-size: 18px;
+  }
+
+  .toolbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .btn-manage, .btn-import {
+    padding: 7px 12px;
+    font-size: 12px;
+    border-radius: var(--radius-md);
+  }
+
+  /* 第二行：搜索框整行铺开 */
   .search-wrap {
+    width: 100%;
     max-width: 100%;
     min-width: 0;
   }
 
-  .toolbar-actions {
+  .search-input {
     width: 100%;
-    justify-content: space-between;
-  }
-
-  .btn-manage, .btn-import {
-    flex: 1;
-    justify-content: center;
-    padding: 8px 12px;
-    font-size: 13px;
+    padding: 9px 32px 9px 36px;
+    font-size: 13.5px;
   }
 
   .manage-bar {
-    padding: 10px 14px;
+    padding: 10px 12px;
     margin-bottom: 16px;
     flex-direction: column;
     align-items: stretch;
     gap: 10px;
   }
 
+  .manage-info {
+    justify-content: space-between;
+  }
+
   .manage-actions {
     justify-content: space-between;
     width: 100%;
+    gap: 6px;
   }
 
   .btn-manage-action {
@@ -1010,9 +1101,18 @@ onMounted(() => fetchBooks(true))
     font-size: 12px;
   }
 
+  /* 书籍网格：从左到右平铺排列（3 列等宽自适应） */
   .book-grid {
-    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 16px 10px;
+    justify-content: start;
+  }
+
+  .book-card {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
   }
 
   .book-title {
@@ -1021,6 +1121,18 @@ onMounted(() => fetchBooks(true))
 
   .book-author {
     font-size: 11px;
+  }
+}
+
+@media (max-width: 360px) {
+  .book-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px 6px;
+  }
+
+  .btn-manage, .btn-import {
+    padding: 6px 8px;
+    font-size: 11.5px;
   }
 }
 </style>
