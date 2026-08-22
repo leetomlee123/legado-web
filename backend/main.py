@@ -1766,7 +1766,12 @@ def mount_frontend():
             return write_msg(404, "not found")
         target = dist / path
         if target.is_file():
-            return send_from_directory(dist, path)
+            resp = send_from_directory(dist, path)
+            if path == "sw.js" or path == "registerSW.js":
+                resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            elif path.endswith(".webmanifest"):
+                resp.mimetype = "application/manifest+json"
+            return resp
         return send_from_directory(dist, "index.html")
 
 

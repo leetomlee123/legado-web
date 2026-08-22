@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2a241e"/>
+      <stop offset="100%" stop-color="#14110e"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f3d078"/>
+      <stop offset="50%" stop-color="#d4af37"/>
+      <stop offset="100%" stop-color="#aa820a"/>
+    </linearGradient>
+    <linearGradient id="pageGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#ede7d8"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+  <!-- Background Card -->
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <rect width="504" height="504" x="4" y="4" rx="108" fill="none" stroke="url(#gold)" stroke-width="6" opacity="0.65"/>
+  
+  <!-- Book Motif -->
+  <g filter="url(#shadow)">
+    <!-- Spine Base -->
+    <path d="M256 380 C240 370 190 352 110 352 C90 352 76 364 76 384 L76 160 C76 142 90 130 110 130 C190 130 240 148 256 160 C272 148 322 130 402 130 C422 130 436 142 436 160 L436 384 C436 364 422 352 402 352 C322 352 272 370 256 380 Z" fill="url(#gold)"/>
+    
+    <!-- Left Page -->
+    <path d="M250 368 C236 358 190 342 116 342 C100 342 90 350 90 362 L90 152 C90 140 100 132 116 132 C190 132 236 148 250 158 Z" fill="url(#pageGrad)"/>
+    <!-- Right Page -->
+    <path d="M262 368 C276 358 322 342 396 342 C412 342 422 350 422 362 L422 152 C422 140 412 132 396 132 C322 132 276 148 262 158 Z" fill="url(#pageGrad)"/>
+    
+    <!-- Left Page Lines -->
+    <line x1="124" y1="184" x2="222" y2="198" stroke="#8b7355" stroke-width="5" stroke-linecap="round" opacity="0.6"/>
+    <line x1="124" y1="226" x2="222" y2="240" stroke="#8b7355" stroke-width="5" stroke-linecap="round" opacity="0.6"/>
+    <line x1="124" y1="268" x2="222" y2="282" stroke="#8b7355" stroke-width="5" stroke-linecap="round" opacity="0.6"/>
+    <line x1="124" y1="310" x2="190" y2="319" stroke="#8b7355" stroke-width="5" stroke-linecap="round" opacity="0.6"/>
+
+    <!-- Right Page Lines -->
+    <line x1="290" y1="198" x2="388" y2="184" stroke="#8b7355" stroke-width="5" stroke-linecap="round" opacity="0.6"/>
+    <line x1="290" y1="240" x2="388" y2="226" stroke="#8b7355" stroke-width="5" stroke-linecap="round" opacity="0.6"/>
+    <line x1="290" y1="282" x2="388" y2="268" stroke="#8b7355" stroke-width="5" stroke-linecap="round" opacity="0.6"/>
+    <line x1="290" y1="319" x2="356" y2="310" stroke="#8b7355" stroke-width="5" stroke-linecap="round" opacity="0.6"/>
+
+    <!-- Center Bookmark Ribbon -->
+    <path d="M252 140 L260 140 L260 270 L256 260 L252 270 Z" fill="#ed424b"/>
+  </g>
+</svg>

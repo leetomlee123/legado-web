@@ -41,6 +41,23 @@
       <header class="app-header" role="banner">
         <h1 class="header-title">{{ route.meta?.title || '阅读' }}</h1>
         <div class="header-actions">
+          <!-- PWA 安装应用按钮 -->
+          <button
+            v-if="showInstallBtn"
+            id="header-pwa-install-btn"
+            class="pwa-install-btn"
+            aria-label="安装为独立应用"
+            @click="installPwa"
+            title="安装 Legado Web 为独立桌面/手机应用 (PWA)"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            <span>安装应用</span>
+          </button>
+
           <button
             id="header-search-btn"
             class="action-btn"
@@ -76,12 +93,44 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 const route = useRoute()
 const router = useRouter()
 const activePath = computed(() => route.path)
+
+// ── PWA 安装提示 ──────────────────────────────────────────
+const deferredPrompt = ref<any>(null)
+const showInstallBtn = ref(false)
+
+function onBeforeInstallPrompt(e: Event) {
+  e.preventDefault()
+  deferredPrompt.value = e
+  showInstallBtn.value = true
+}
+
+async function installPwa() {
+  if (!deferredPrompt.value) return
+  deferredPrompt.value.prompt()
+  const { outcome } = await deferredPrompt.value.userChoice
+  if (outcome === 'accepted') {
+    showInstallBtn.value = false
+    deferredPrompt.value = null
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('beforeinstallprompt', onBeforeInstallPrompt)
+  window.addEventListener('appinstalled', () => {
+    showInstallBtn.value = false
+    deferredPrompt.value = null
+  })
+})
+
+onUnmounted(() => {
+  window.removeEventListener('beforeinstallprompt', onBeforeInstallPrompt)
+})
 
 const navItems = [
   {
@@ -321,7 +370,29 @@ const navItems = [
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
+}
+
+.pwa-install-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--radius-md);
+  background: rgba(184, 134, 58, 0.12);
+  border: 1px solid rgba(184, 134, 58, 0.35);
+  color: var(--color-accent);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-family: inherit;
+}
+
+.pwa-install-btn:hover {
+  background: var(--color-accent);
+  color: #ffffff;
+  border-color: var(--color-accent);
 }
 
 .action-btn {
