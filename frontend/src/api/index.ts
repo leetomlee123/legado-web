@@ -326,6 +326,10 @@ export interface AppSettings {
   healthCheckInterval?: number
   auto_disable_dead?: boolean
   autoDisableDead?: boolean
+  auto_refresh_chapters_enabled?: boolean
+  autoRefreshChaptersEnabled?: boolean
+  auto_refresh_chapters_interval?: number
+  autoRefreshChaptersInterval?: number
 }
 
 export async function getSettings(): Promise<AppSettings> {
@@ -395,6 +399,45 @@ export async function disableDeadSources(): Promise<{ ok: boolean; disabledCount
 export async function deleteDeadSources(): Promise<{ ok: boolean; deletedCount: number; message: string }> {
   const res = await http.post('/sources/health/delete-dead')
   return res as unknown as { ok: boolean; deletedCount: number; message: string }
+}
+
+// ─── 书架章节定时/手动批量刷新 API ────────────────────────────
+
+export interface BookshelfRefreshProgress {
+  total: number
+  completed: number
+  currentBook: string
+  updatedBooks: number
+  newChaptersTotal: number
+  failedBooks: number
+}
+
+export interface BookshelfRefreshLastResult {
+  total: number
+  updatedBooks: number
+  newChaptersTotal: number
+  failedBooks: number
+  updatedBookNames: string[]
+  durationMs: number
+}
+
+export interface BookshelfRefreshStatus {
+  refreshing: boolean
+  enabled: boolean
+  intervalHours: number
+  lastRefreshTime: string
+  progress: BookshelfRefreshProgress
+  lastResult: BookshelfRefreshLastResult
+}
+
+export async function getBookshelfRefreshStatus(): Promise<BookshelfRefreshStatus> {
+  const res = await http.get('/bookshelf/refresh/status')
+  return res as unknown as BookshelfRefreshStatus
+}
+
+export async function runBookshelfRefresh(): Promise<{ ok: boolean; message: string }> {
+  const res = await http.post('/bookshelf/refresh/run')
+  return res as unknown as { ok: boolean; message: string }
 }
 
 // ─── 预览模式（免入书架实时抓取）────────────────────────

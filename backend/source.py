@@ -2365,22 +2365,45 @@ def refresh_web_chapters(book: dict) -> None:
 
     db_t0 = time.perf_counter()
     conn = require_db()
+
+    # 查取已有章节缓存正文与历史章节总数
+    old_rows = conn.execute("SELECT idx, title, content_url, content FROM chapter WHERE book_id=?", (book_id,)).fetchall()
+    old_count = len(old_rows)
+    cached_by_url = {r["content_url"]: r["content"] for r in old_rows if r["content"]}
+    cached_by_title = {r["title"]: r["content"] for r in old_rows if r["content"]}
+
+    # 重建章节列表并继承已缓存的正文数据
     conn.execute("DELETE FROM chapter WHERE book_id=?", (book_id,))
+    insert_data = []
+    for i, c in enumerate(toc):
+        c_url = c.get("chapterUrl") or ""
+        c_title = c.get("title") or ""
+        c_content = cached_by_url.get(c_url) or cached_by_title.get(c_title) or ""
+        insert_data.append((book_id, c_title, i, c_url, c_content))
+
     conn.executemany(
-        "INSERT INTO chapter (book_id, title, idx, content_url) VALUES (?, ?, ?, ?)",
-        [(book_id, c["title"], i, c["chapterUrl"]) for i, c in enumerate(toc)],
+        "INSERT INTO chapter (book_id, title, idx, content_url, content) VALUES (?, ?, ?, ?, ?)",
+        insert_data,
     )
+
+    new_count = len(toc)
+    new_chapters_count = max(0, new_count - old_count)
+    if new_chapters_count > 0:
+        conn.execute("UPDATE book SET has_update=1 WHERE id=?", (book_id,))
+
     conn.commit()
     db_elapsed_ms = int((time.perf_counter() - db_t0) * 1000)
     total_elapsed_ms = int((time.perf_counter() - t0) * 1000)
     logger.info(
-        "[目录入库] 《%s》(ID:%s) 成功写入 %d 个章节至数据库 (写入耗时 %dms, 整体耗时 %dms)",
+        "[目录入库] 《%s》(ID:%s) 成功写入 %d 个章节至数据库 (新增 %d 章, 写入耗时 %dms, 整体耗时 %dms)",
         book_name,
         book_id,
         len(toc),
+        new_chapters_count,
         db_elapsed_ms,
         total_elapsed_ms,
     )
+    return new_chapters_count
 
 
 def fetch_web_chapter(book: dict, chapter_url: str, chapter_title: str = "") -> str:

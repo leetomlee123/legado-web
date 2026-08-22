@@ -171,6 +171,116 @@
       </div>
     </div>
 
+    <!-- ── 书架章节定时自动刷新 ──────────────────────────── -->
+    <div class="settings-card">
+      <div class="card-header">
+        <div class="card-icon" style="background: rgba(184, 134, 11, 0.15); color: var(--color-accent);" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+            <polyline points="10 9 13 12 10 15"/>
+          </svg>
+        </div>
+        <div style="flex: 1;">
+          <div class="card-title-row">
+            <div class="card-title">书架章节定时自动刷新</div>
+            <el-tag size="small" :type="refreshStatus?.refreshing ? 'warning' : (autoRefreshChaptersEnabled ? 'success' : 'info')">
+              {{ refreshStatus?.refreshing ? '正在同步章节...' : (autoRefreshChaptersEnabled ? '定时更新已启用' : '已暂停') }}
+            </el-tag>
+          </div>
+          <p class="card-desc">按设定周期在后台自动巡检书架中所有网络书籍的目录，抓取最新章节并标记更新红点。</p>
+        </div>
+      </div>
+
+      <!-- 开关 -->
+      <div class="field-group-inline">
+        <div>
+          <div class="field-label">启用书架章节自动刷新</div>
+          <span class="field-hint">后台静默比对书架内网络书籍的目录与最新章节数，自动保留本地已缓存正文。</span>
+        </div>
+        <el-switch v-model="autoRefreshChaptersEnabled" />
+      </div>
+
+      <!-- 刷新周期 -->
+      <div class="field-group" v-if="autoRefreshChaptersEnabled">
+        <div class="field-title-row">
+          <label class="field-label">自动刷新周期</label>
+          <span class="field-tag">{{ autoRefreshChaptersInterval < 1 ? `每 ${Math.round(autoRefreshChaptersInterval * 60)} 分钟` : `每 ${autoRefreshChaptersInterval} 小时` }}一次</span>
+        </div>
+        <div class="field-control-row">
+          <div class="preset-chips">
+            <button class="chip-btn" :class="{ active: autoRefreshChaptersInterval === 0.5 }" @click="autoRefreshChaptersInterval = 0.5">每 30 分钟</button>
+            <button class="chip-btn" :class="{ active: autoRefreshChaptersInterval === 1 }" @click="autoRefreshChaptersInterval = 1">每 1 小时</button>
+            <button class="chip-btn" :class="{ active: autoRefreshChaptersInterval === 2 }" @click="autoRefreshChaptersInterval = 2">每 2 小时</button>
+            <button class="chip-btn" :class="{ active: autoRefreshChaptersInterval === 6 }" @click="autoRefreshChaptersInterval = 6">每 6 小时 (推荐)</button>
+            <button class="chip-btn" :class="{ active: autoRefreshChaptersInterval === 12 }" @click="autoRefreshChaptersInterval = 12">每 12 小时</button>
+            <button class="chip-btn" :class="{ active: autoRefreshChaptersInterval === 24 }" @click="autoRefreshChaptersInterval = 24">每 24 小时 (每天一次)</button>
+          </div>
+        </div>
+        <span class="field-hint">建议设置为 2~6 小时，既能及时感知追更更新，又保持系统与网络极低负载。</span>
+      </div>
+
+      <!-- 刷新概览卡片 -->
+      <div class="health-summary-box">
+        <div class="summary-header">
+          <span class="summary-title">最近同步结果</span>
+          <span class="summary-time">{{ refreshStatus?.lastRefreshTime ? `完成于 ${refreshStatus.lastRefreshTime}` : '暂未执行过书架自动同步' }}</span>
+        </div>
+
+        <!-- 同步中进度条 -->
+        <div v-if="refreshStatus?.refreshing" class="refresh-progress-box">
+          <div class="progress-bar-wrap">
+            <div
+              class="progress-bar-fill"
+              :style="{ width: `${(refreshStatus.progress.total ? (refreshStatus.progress.completed / refreshStatus.progress.total) * 100 : 0)}%` }"
+            ></div>
+          </div>
+          <div class="progress-text">
+            <span>正在更新: <strong>{{ refreshStatus.progress.currentBook || '正在请求目录...' }}</strong></span>
+            <span>{{ refreshStatus.progress.completed }} / {{ refreshStatus.progress.total }} 本</span>
+          </div>
+        </div>
+
+        <div class="health-stats-row">
+          <div class="stat-item total">
+            <span class="stat-val">{{ refreshStatus?.lastResult?.total ?? (refreshStatus?.progress?.total || 0) }}</span>
+            <span class="stat-lbl">书架网文数</span>
+          </div>
+          <div class="stat-item healthy">
+            <span class="stat-val">{{ refreshStatus?.lastResult?.updatedBooks ?? (refreshStatus?.progress?.updatedBooks || 0) }}</span>
+            <span class="stat-lbl">🟢 发现更新书籍</span>
+          </div>
+          <div class="stat-item healthy">
+            <span class="stat-val">{{ refreshStatus?.lastResult?.newChaptersTotal ?? (refreshStatus?.progress?.newChaptersTotal || 0) }}</span>
+            <span class="stat-lbl">✨ 新增章节总数</span>
+          </div>
+          <div class="stat-item" :class="(refreshStatus?.lastResult?.failedBooks || 0) > 0 ? 'dead' : 'total'">
+            <span class="stat-val">{{ refreshStatus?.lastResult?.failedBooks ?? 0 }}</span>
+            <span class="stat-lbl">⚠️ 同步失败</span>
+          </div>
+        </div>
+
+        <div v-if="refreshStatus?.lastResult?.updatedBookNames?.length" class="updated-books-tags">
+          <span class="update-tag-lbl">最新追更:</span>
+          <span v-for="bname in refreshStatus.lastResult.updatedBookNames" :key="bname" class="update-book-chip">
+            {{ bname }}
+          </span>
+        </div>
+
+        <div class="health-actions-row">
+          <el-button
+            type="primary"
+            class="btn-gold"
+            size="small"
+            :loading="refreshStatus?.refreshing || runningRefresh"
+            @click="handleRunBookshelfRefresh"
+          >
+            ⚡ 立即刷新书架所有书籍章节
+          </el-button>
+        </div>
+      </div>
+    </div>
+
     <!-- ── 网络代理配置 ──────────────────────────────────── -->
     <div class="settings-card">
       <div class="card-header">
@@ -329,8 +439,11 @@ import {
   runHealthCheck,
   disableDeadSources,
   testProxy,
+  getBookshelfRefreshStatus,
+  runBookshelfRefresh,
   type HealthStatusRes,
   type ProxyTestResult,
+  type BookshelfRefreshStatus,
 } from '@/api'
 
 const proxy = ref('')
@@ -342,11 +455,16 @@ const healthCheckEnabled = ref(true)
 const healthCheckInterval = ref(6)
 const autoDisableDead = ref(false)
 
+const autoRefreshChaptersEnabled = ref(true)
+const autoRefreshChaptersInterval = ref(6)
+
 const saving = ref(false)
 const testingProxy = ref(false)
 const proxyTestResult = ref<ProxyTestResult | null>(null)
 const runningCheck = ref(false)
+const runningRefresh = ref(false)
 const healthStatus = ref<HealthStatusRes | null>(null)
+const refreshStatus = ref<BookshelfRefreshStatus | null>(null)
 let pollTimer: number | null = null
 
 async function loadSettings() {
@@ -360,6 +478,8 @@ async function loadSettings() {
     healthCheckEnabled.value = s.health_check_enabled ?? (s.healthCheckEnabled ?? true)
     healthCheckInterval.value = s.health_check_interval ?? (s.healthCheckInterval ?? 6)
     autoDisableDead.value = s.auto_disable_dead ?? (s.autoDisableDead ?? false)
+    autoRefreshChaptersEnabled.value = s.auto_refresh_chapters_enabled ?? (s.autoRefreshChaptersEnabled ?? true)
+    autoRefreshChaptersInterval.value = s.auto_refresh_chapters_interval ?? (s.autoRefreshChaptersInterval ?? 6)
   } catch (e: any) {
     ElMessage.error(e.message || '加载配置失败')
   }
@@ -368,6 +488,14 @@ async function loadSettings() {
 async function loadHealthStatus() {
   try {
     healthStatus.value = await getHealthStatus()
+  } catch (e) {
+    // ignore
+  }
+}
+
+async function loadBookshelfRefreshStatus() {
+  try {
+    refreshStatus.value = await getBookshelfRefreshStatus()
   } catch (e) {
     // ignore
   }
@@ -383,6 +511,19 @@ async function handleRunHealthCheck() {
     ElMessage.error(e.message || '启动体检失败')
   } finally {
     runningCheck.value = false
+  }
+}
+
+async function handleRunBookshelfRefresh() {
+  runningRefresh.value = true
+  try {
+    const res = await runBookshelfRefresh()
+    ElMessage.success(res.message || '已在后台启动书架章节列表全量同步')
+    await loadBookshelfRefreshStatus()
+  } catch (e: any) {
+    ElMessage.error(e.message || '启动章节同步失败')
+  } finally {
+    runningRefresh.value = false
   }
 }
 
@@ -428,6 +569,8 @@ function resetDefaults() {
   healthCheckEnabled.value = true
   healthCheckInterval.value = 6
   autoDisableDead.value = false
+  autoRefreshChaptersEnabled.value = true
+  autoRefreshChaptersInterval.value = 6
   ElMessage.info('已重置为系统默认推荐参数，请点击「保存配置」生效')
 }
 
@@ -445,6 +588,10 @@ async function save() {
       health_check_enabled: healthCheckEnabled.value,
       health_check_interval: healthCheckInterval.value,
       auto_disable_dead: autoDisableDead.value,
+      auto_refresh_chapters_enabled: autoRefreshChaptersEnabled.value,
+      autoRefreshChaptersEnabled: autoRefreshChaptersEnabled.value,
+      auto_refresh_chapters_interval: autoRefreshChaptersInterval.value,
+      autoRefreshChaptersInterval: autoRefreshChaptersInterval.value,
     })
     ElNotification({
       title: '设置保存成功',
@@ -462,7 +609,11 @@ async function save() {
 onMounted(() => {
   loadSettings()
   loadHealthStatus()
-  pollTimer = window.setInterval(loadHealthStatus, 8000)
+  loadBookshelfRefreshStatus()
+  pollTimer = window.setInterval(() => {
+    loadHealthStatus()
+    loadBookshelfRefreshStatus()
+  }, 6000)
 })
 
 onUnmounted(() => {
@@ -795,6 +946,70 @@ onUnmounted(() => {
   align-items: center;
   gap: 10px;
   margin-top: 4px;
+}
+
+/* 章节同步进度与标签 */
+.refresh-progress-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+
+.progress-bar-wrap {
+  width: 100%;
+  height: 6px;
+  background: var(--color-border-subtle);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: var(--color-accent);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.progress-text {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.progress-text strong {
+  color: var(--color-accent);
+}
+
+.updated-books-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  background: var(--color-surface);
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--color-border-subtle);
+  font-size: 12px;
+}
+
+.update-tag-lbl {
+  color: var(--color-text-muted);
+  font-weight: 600;
+}
+
+.update-book-chip {
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(39, 201, 63, 0.12);
+  color: #27c93f;
+  font-size: 11.5px;
+  font-weight: 500;
 }
 
 /* 底部操作条 */

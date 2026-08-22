@@ -1190,6 +1190,8 @@ def get_settings():
         get_health_check_enabled,
         get_health_check_interval,
         get_auto_disable_dead,
+        get_auto_refresh_chapters_enabled,
+        get_auto_refresh_chapters_interval,
     )
     return jsonify({
         "proxy": get_raw_proxy(),
@@ -1207,6 +1209,10 @@ def get_settings():
         "healthCheckInterval": get_health_check_interval(),
         "auto_disable_dead": get_auto_disable_dead(),
         "autoDisableDead": get_auto_disable_dead(),
+        "auto_refresh_chapters_enabled": get_auto_refresh_chapters_enabled(),
+        "autoRefreshChaptersEnabled": get_auto_refresh_chapters_enabled(),
+        "auto_refresh_chapters_interval": get_auto_refresh_chapters_interval(),
+        "autoRefreshChaptersInterval": get_auto_refresh_chapters_interval(),
     })
 
 
@@ -1230,6 +1236,10 @@ def update_settings():
         set_health_check_interval,
         get_auto_disable_dead,
         set_auto_disable_dead,
+        get_auto_refresh_chapters_enabled,
+        set_auto_refresh_chapters_enabled,
+        get_auto_refresh_chapters_interval,
+        set_auto_refresh_chapters_interval,
     )
     body = request.get_json(silent=True) or {}
     if "proxy" in body:
@@ -1254,9 +1264,15 @@ def update_settings():
         set_health_check_interval(body.get("health_check_interval") or body.get("healthCheckInterval"))
     if "auto_disable_dead" in body or "autoDisableDead" in body:
         set_auto_disable_dead(body.get("auto_disable_dead") if "auto_disable_dead" in body else body.get("autoDisableDead"))
+    if "auto_refresh_chapters_enabled" in body or "autoRefreshChaptersEnabled" in body:
+        ar = body.get("auto_refresh_chapters_enabled") if "auto_refresh_chapters_enabled" in body else body.get("autoRefreshChaptersEnabled")
+        set_auto_refresh_chapters_enabled(ar)
+    if "auto_refresh_chapters_interval" in body or "autoRefreshChaptersInterval" in body:
+        ai = body.get("auto_refresh_chapters_interval") if "auto_refresh_chapters_interval" in body else body.get("autoRefreshChaptersInterval")
+        set_auto_refresh_chapters_interval(ai)
 
-    logger.info("系统设置已更新: proxy=%s (enabled=%s), m_to_www=%s, timeout=%s, max_workers=%s, health_check=%s(%sh), auto_disable_dead=%s",
-        get_raw_proxy(), get_proxy_enabled(), get_m_to_www(), get_timeout(), get_max_workers(), get_health_check_enabled(), get_health_check_interval(), get_auto_disable_dead())
+    logger.info("系统设置已更新: proxy=%s (enabled=%s), m_to_www=%s, timeout=%s, max_workers=%s, health_check=%s(%sh), auto_disable_dead=%s, auto_refresh_chapters=%s(%.1fh)",
+        get_raw_proxy(), get_proxy_enabled(), get_m_to_www(), get_timeout(), get_max_workers(), get_health_check_enabled(), get_health_check_interval(), get_auto_disable_dead(), get_auto_refresh_chapters_enabled(), get_auto_refresh_chapters_interval())
     return jsonify({
         "ok": True,
         "proxy": get_raw_proxy(),
@@ -1274,6 +1290,10 @@ def update_settings():
         "healthCheckInterval": get_health_check_interval(),
         "auto_disable_dead": get_auto_disable_dead(),
         "autoDisableDead": get_auto_disable_dead(),
+        "auto_refresh_chapters_enabled": get_auto_refresh_chapters_enabled(),
+        "autoRefreshChaptersEnabled": get_auto_refresh_chapters_enabled(),
+        "auto_refresh_chapters_interval": get_auto_refresh_chapters_interval(),
+        "autoRefreshChaptersInterval": get_auto_refresh_chapters_interval(),
     })
 
 
@@ -1283,6 +1303,30 @@ def test_proxy_route():
     from settings import test_proxy_connection
     body = request.get_json(silent=True) or {}
     proxy = (body.get("proxy") or "").strip()
+    return jsonify(test_proxy_connection(proxy))
+
+
+# ─── 书架章节定时/手动批量刷新 API ────────────────────────────
+
+@app.get("/api/bookshelf/refresh/status")
+def get_bookshelf_refresh_status_route():
+    """获取当前书架章节刷新状态、配置与上次结果。"""
+    from bookshelf_refresh import bookshelf_refresh_manager
+    return jsonify(bookshelf_refresh_manager.get_status())
+
+
+@app.post("/api/bookshelf/refresh/run")
+def run_bookshelf_refresh_route():
+    """手动立即触发书架所有网络书籍的章节列表刷新。"""
+    import threading
+    from bookshelf_refresh import bookshelf_refresh_manager
+    status = bookshelf_refresh_manager.get_status()
+    if status.get("refreshing"):
+        return jsonify({"ok": False, "message": "已有正在进行的章节刷新任务，请稍候"}), 400
+
+    threading.Thread(target=bookshelf_refresh_manager.run_refresh, kwargs={"manual": True}, daemon=True).start()
+    return jsonify({"ok": True, "message": "已在后台启动书架书籍章节全量同步"})
+
     res = test_proxy_connection(proxy)
     if res.get("ok"):
         logger.info("代理连通性测试成功: 代理=%s, 出口IP=%s, 延迟=%dms", res.get("proxy"), res.get("ip"), res.get("delay"))
@@ -1728,8 +1772,10 @@ def mount_frontend():
 
 def main():
     from health import health_manager
+    from bookshelf_refresh import bookshelf_refresh_manager
     open_db()
     health_manager.start()
+    bookshelf_refresh_manager.start()
     mount_frontend()
     port = os.environ.get("PORT") or "4388"
     print(f"[Legado Web] 后端已启动: http://localhost:{port}")
@@ -1738,3 +1784,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

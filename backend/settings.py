@@ -248,3 +248,36 @@ def get_auto_disable_dead() -> bool:
 def set_auto_disable_dead(enabled: bool | str | int) -> None:
     val = "1" if str(enabled).lower() in ("1", "true") else "0"
     set_setting(AUTO_DISABLE_DEAD_KEY, val)
+
+
+AUTO_REFRESH_CHAPTERS_ENABLED_KEY = "auto_refresh_chapters_enabled"
+AUTO_REFRESH_CHAPTERS_INTERVAL_KEY = "auto_refresh_chapters_interval"
+
+
+def get_auto_refresh_chapters_enabled() -> bool:
+    """是否启用书架内网络书籍章节列表定时自动刷新。"""
+    v = get_setting(AUTO_REFRESH_CHAPTERS_ENABLED_KEY, "1")
+    return v in ("1", "true", "True", "yes", "on")
+
+
+def set_auto_refresh_chapters_enabled(enabled: bool | str | int) -> None:
+    val = "1" if str(enabled).lower() in ("1", "true", "yes", "on") else "0"
+    set_setting(AUTO_REFRESH_CHAPTERS_ENABLED_KEY, val)
+
+
+def get_auto_refresh_chapters_interval() -> float:
+    """书架章节定时刷新周期（小时，默认 6 小时，支持 0.5 小时等）。"""
+    v = get_setting(AUTO_REFRESH_CHAPTERS_INTERVAL_KEY, "6")
+    try:
+        val = float(v)
+        return max(0.25, min(72.0, val))
+    except (ValueError, TypeError):
+        return 6.0
+
+
+def set_auto_refresh_chapters_interval(hours: float | int | str) -> None:
+    try:
+        val = max(0.25, min(72.0, float(hours)))
+    except (ValueError, TypeError):
+        val = 6.0
+    set_setting(AUTO_REFRESH_CHAPTERS_INTERVAL_KEY, str(val))
