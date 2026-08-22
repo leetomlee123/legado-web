@@ -47,7 +47,7 @@ def decode_http_response(resp) -> str:
         return content.decode("gb18030", errors="replace")
 
 
-def fetch_url(url: str, timeout: float = 20, base_url: str = "", context: str = "") -> str:
+def fetch_url(url: str, timeout: float = 20, base_url: str = "", context: str = "", custom_headers: dict | None = None, headers: dict | None = None) -> str:
     t0 = time.perf_counter()
     url = (url or "").strip()
     if base_url:
@@ -55,6 +55,12 @@ def fetch_url(url: str, timeout: float = 20, base_url: str = "", context: str = 
             url = urljoin(base_url, url)
     if not (url.startswith("http://") or url.startswith("https://")):
         raise ValueError(f"无效的请求地址: {url}")
+
+    req_headers = {"User-Agent": UA}
+    if custom_headers:
+        req_headers.update(custom_headers)
+    if headers:
+        req_headers.update(headers)
 
     # 构建主选与回退候选地址列表
     candidates = [url]
@@ -88,7 +94,7 @@ def fetch_url(url: str, timeout: float = 20, base_url: str = "", context: str = 
                 cand_url,
                 impersonate="chrome120",
                 timeout=timeout,
-                headers={"User-Agent": UA},
+                headers=req_headers,
                 allow_redirects=True,
                 proxy=get_proxy() or None,
                 verify=False,
@@ -122,6 +128,36 @@ def fetch_url(url: str, timeout: float = 20, base_url: str = "", context: str = 
             )
             return html
         except Exception as e:
+            # 尝试标准 urllib 兜底请求（规避某些服务器对 BoringSSL 指纹握手偶发断开的问题）
+            try:
+                import ssl, urllib.request
+                ssl_ctx = ssl.create_default_context()
+                ssl_ctx.check_hostname = False
+                ssl_ctx.verify_mode = ssl.CERT_NONE
+                req = urllib.request.Request(cand_url, headers=req_headers)
+                with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx) as u_resp:
+                    u_bytes = u_resp.read()
+                    for cs in ["utf-8", "gbk", "gb18030", "big5"]:
+                        try:
+                            html = u_bytes.decode(cs)
+                            break
+                        except Exception:
+                            pass
+                    else:
+                        html = u_bytes.decode("utf-8", errors="ignore")
+                    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+                    logger.info(
+                        "%s[urllib兜底] GET 请求成功: 状态码 %d, 耗时 %dms, 响应大小 %d 字节, 最终URL: %s",
+                        ctx_label,
+                        getattr(u_resp, "status", 200),
+                        elapsed_ms,
+                        len(u_bytes),
+                        cand_url,
+                    )
+                    return html
+            except Exception:
+                pass
+
             last_err = e
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             logger.warning(
@@ -1124,7 +1160,7 @@ def eval_js_snippet(code: str, result: str = "", base_url: str = "", book: dict 
     const http = require("http");
     const https = require("https");
     const crypto = require("crypto");
-    const execSync = require("child_process").execSync;
+    const execFileSync = require("child_process").execFileSync;
 
     const baseUrl = {json.dumps(base_url)};
     let result = {json.dumps(result)};
@@ -1166,10 +1202,13 @@ def eval_js_snippet(code: str, result: str = "", base_url: str = "", book: dict 
             headers["Referer"] = baseUrl;
         }}
         
-        let headerArgs = Object.entries(headers).map(([k, v]) => `-H "${{k}}: ${{v}}"`).join(" ");
-        let cmd = `curl -s -L --max-time 15 ${{headerArgs}} "${{target}}"`;
+        let args = ["-s", "-L", "--max-time", "15", "--insecure"];
+        for (let [k, v] of Object.entries(headers)) {{
+            args.push("-H", `${{k}}: ${{v}}`);
+        }}
+        args.push(target);
         try {{
-            let outBuf = execSync(cmd);
+            let outBuf = execFileSync("curl", args);
             return outBuf.toString("utf-8");
         }} catch(e) {{
             return "";
@@ -1223,7 +1262,7 @@ def eval_js_snippet(code: str, result: str = "", base_url: str = "", book: dict 
                     ajax_url = f"{scheme}://{b_host}/modules/article/ajax2.php?aid={aid}&cid={cid}&token={t_val}&timestamp={ts_val}&nonce={n_val}"
                     ajax_resp = fetch_url(
                         ajax_url,
-                        headers={
+                        custom_headers={
                             "Referer": base_url,
                             "X-Requested-With": "XMLHttpRequest",
                             "Accept": "text/plain, */*; q=0.01",
@@ -1239,6 +1278,56 @@ def eval_js_snippet(code: str, result: str = "", base_url: str = "", book: dict 
             pass
 
     return result
+
+
+def json_search(data: Any, path: str) -> list[str]:
+    """无需第三方依赖的纯 Python JSON 递归提取器，支持 $.key, $..key, $.a.b, key.0 等"""
+    if not isinstance(data, (dict, list)):
+        return []
+    path = path.strip()
+    if path.startswith("@json:"):
+        path = path[6:].strip()
+    if path.startswith("$.."):
+        target_key = path[3:].strip()
+        results = []
+        def _walk(node):
+            if isinstance(node, dict):
+                if target_key in node:
+                    v = node[target_key]
+                    if v is not None:
+                        results.append(str(v))
+                for v in node.values():
+                    _walk(v)
+            elif isinstance(node, list):
+                for item in node:
+                    _walk(item)
+        _walk(data)
+        return results
+
+    if path.startswith("$."):
+        path = path[2:]
+
+    parts = path.split(".")
+    curr = [data]
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        next_curr = []
+        for item in curr:
+            if isinstance(item, dict) and p in item:
+                next_curr.append(item[p])
+            elif isinstance(item, list):
+                if p.isdigit():
+                    idx = int(p)
+                    if 0 <= idx < len(item):
+                        next_curr.append(item[idx])
+                else:
+                    for sub in item:
+                        if isinstance(sub, dict) and p in sub:
+                            next_curr.append(sub[p])
+        curr = next_curr
+    return [str(c) for c in curr if c is not None]
 
 
 def extract_values(el: Tag | dict | list | str | None, rule: str, base_url: str = "") -> list[str]:
@@ -1269,6 +1358,14 @@ def extract_values(el: Tag | dict | list | str | None, rule: str, base_url: str 
         js_code = rule[4:].strip()
         js_res = eval_js_snippet(js_code, "", base_url)
         return [js_res] if js_res else []
+
+    # 处理顶层 || fallback
+    if "||" in rule:
+        for branch in rule.split("||"):
+            res = extract_values(el, branch.strip(), base_url)
+            if res:
+                return res
+        return []
 
     if el is None:
         return []
@@ -1322,41 +1419,46 @@ def extract_values(el: Tag | dict | list | str | None, rule: str, base_url: str 
 
     # 3. JSON / JSONPath 支持 (@json: 或 $. 开头，或输入元素是 dict/list)
     if isinstance(el, (dict, list)) or rule.startswith("@json:") or rule.startswith("$.") or rule.startswith("$.."):
-        try:
-            from jsonpath_ng.ext import parse as jp_parse
-            target_data = el
-            jp_expr = rule
-            if rule.startswith("@json:"):
-                jp_expr = rule[6:].strip()
-            if isinstance(el, Tag) or isinstance(el, str):
+        target_data = el
+        jp_expr = rule
+        if rule.startswith("@json:"):
+            jp_expr = rule[6:].strip()
+        if isinstance(el, (Tag, str)):
+            try:
                 raw_str = el.get_text() if isinstance(el, Tag) else str(el)
                 target_data = json.loads(raw_str)
+            except Exception:
+                target_data = None
 
-            if isinstance(target_data, (dict, list)):
-                jp_parts = jp_expr.split("##")
-                jp_expr = jp_parts[0].strip()
-                jp_reps = jp_parts[1:]
-                if not jp_expr.startswith("$"):
-                    jp_expr = "$." + jp_expr
-                expr = jp_parse(jp_expr)
-                matches = [m.value for m in expr.find(target_data)]
-                out = []
-                for v in matches:
-                    s_v = str(v).strip() if v is not None else ""
+        if isinstance(target_data, (dict, list)):
+            jp_parts = jp_expr.split("##")
+            clean_jp = jp_parts[0].strip()
+            jp_reps = jp_parts[1:]
+            matches = json_search(target_data, clean_jp)
+            if not matches:
+                try:
+                    from jsonpath_ng.ext import parse as jp_parse
+                    p_expr = clean_jp if clean_jp.startswith("$") else "$." + clean_jp
+                    expr = jp_parse(p_expr)
+                    matches = [m.value for m in expr.find(target_data)]
+                except Exception:
+                    pass
+
+            out = []
+            for v in matches:
+                s_v = str(v).strip() if v is not None else ""
+                if s_v:
+                    for i in range(0, len(jp_reps), 2):
+                        p = jp_reps[i].strip()
+                        if not p: continue
+                        r = jp_reps[i + 1] if i + 1 < len(jp_reps) else ""
+                        s_v = re.sub(p, fix_dollar_backref(r), s_v)
+                    if js_code:
+                        s_v = eval_js_snippet(js_code, s_v, base_url)
                     if s_v:
-                        for i in range(0, len(jp_reps), 2):
-                            p = jp_reps[i].strip()
-                            if not p: continue
-                            r = jp_reps[i + 1] if i + 1 < len(jp_reps) else ""
-                            s_v = re.sub(p, fix_dollar_backref(r), s_v)
-                        if js_code:
-                            s_v = eval_js_snippet(js_code, s_v, base_url)
-                        if s_v:
-                            out.append(s_v)
-                if out:
-                    return out
-        except Exception:
-            pass
+                        out.append(s_v)
+            if out:
+                return out
 
     # 4. XPath 支持
     if rule.startswith("//") or (rule.startswith("/") and not rule.startswith("/@")):
