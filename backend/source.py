@@ -1000,9 +1000,8 @@ def fetch_search_response(
                 html = resp.text
 
             logger.info(
-                "[搜索网络] [%s] HTTP 响应成功%s: 状态码 %d, 耗时 %dms, 响应大小 %d 字节, 最终URL: %s",
+                "[搜索网络] [%s] HTTP 响应成功: 状态码 %d, 耗时 %dms, 响应大小 %d 字节, 最终URL: %s",
                 src_label,
-                " (域名回退成功)" if is_fallback else "",
                 resp.status_code,
                 elapsed_ms,
                 len(content),
@@ -1057,7 +1056,7 @@ def fix_dollar_backref(r_str: str) -> str:
     return out_r
 
 
-def eval_js_snippet(code: str, result: str = "", base_url: str = "") -> str:
+def eval_js_snippet(code: str, result: str = "", base_url: str = "", book: dict | None = None, chapter: dict | None = None) -> str:
     """执行书源规则中的 JavaScript 代码块。优先使用纯 Python 快速链式替换，复杂代码回退到 Node.js 执行。"""
     if not code:
         return result
@@ -1096,6 +1095,8 @@ def eval_js_snippet(code: str, result: str = "", base_url: str = "") -> str:
 
     # 2. 复杂 JS 代码使用 Node.js 执行（内置 java.ajax, java.md5Encode, java.base64Encode, etc.）
     import subprocess
+    book_ctx = book if isinstance(book, dict) else {"bookUrl": base_url, "name": ""}
+    chapter_ctx = chapter if isinstance(chapter, dict) else {}
     script = f"""
     const http = require("http");
     const https = require("https");
@@ -1104,6 +1105,8 @@ def eval_js_snippet(code: str, result: str = "", base_url: str = "") -> str:
 
     const baseUrl = {json.dumps(base_url)};
     let result = {json.dumps(result)};
+    const book = {json.dumps(book_ctx)};
+    const chapter = {json.dumps(chapter_ctx)};
 
     function javaAjax(targetUrlWithOpts) {{
         let target = String(targetUrlWithOpts || "").trim();
@@ -1236,7 +1239,7 @@ def extract_values(el: Tag | dict | list | str | None, rule: str, base_url: str 
             return extract_value(el, sub_r, base_url)
 
         val = re.sub(r"\{\{@@(.*?)}}", _macro_sub, prefix)
-        val = val.replace("{{'\\n'+'​'}}", "\n​").replace('{{"\\n"+"​"}}', "\n​")
+        val = val.replace("{{'\\n'+'​'}}", "\n​").replace('{{"\\n"+"f"}}', "\n​")
         val = re.sub(r"\{\{'([^']*)'\}\}", r"\1", val)
 
         for i in range(0, len(post_replacements), 2):
@@ -1252,31 +1255,25 @@ def extract_values(el: Tag | dict | list | str | None, rule: str, base_url: str 
 
         if js_code:
             val = eval_js_snippet(js_code, val, base_url)
+        return [val.strip()] if val.strip() else []
 
-        val = val.strip()
-        return [val] if val else []
-
-    # 3. JSONPath 支持 (@json:... 或 $. 或 dict/list 数据源)
-    if isinstance(el, (dict, list)) or rule.startswith("@json:") or rule.startswith("@JSon:") or rule.startswith("$."):
+    # 3. JSON / JSONPath 支持 (@json: 或 $. 开头，或输入元素是 dict/list)
+    if isinstance(el, (dict, list)) or rule.startswith("@json:") or rule.startswith("$.") or rule.startswith("$.."):
         try:
             from jsonpath_ng.ext import parse as jp_parse
-            clean_jp = rule
-            if clean_jp.lower().startswith("@json:"):
-                clean_jp = clean_jp[6:].strip()
-            # 分离 ## 正则替换
-            jp_parts = clean_jp.split("##")
-            jp_expr = jp_parts[0].strip()
-            jp_reps = jp_parts[1:]
-
             target_data = el
-            if isinstance(el, str):
-                try:
-                    target_data = json.loads(el)
-                except Exception:
-                    target_data = el
+            jp_expr = rule
+            if rule.startswith("@json:"):
+                jp_expr = rule[6:].strip()
+            if isinstance(el, Tag) or isinstance(el, str):
+                raw_str = el.get_text() if isinstance(el, Tag) else str(el)
+                target_data = json.loads(raw_str)
 
             if isinstance(target_data, (dict, list)):
-                if not jp_expr.startswith("$.") and not jp_expr.startswith("$"):
+                jp_parts = jp_expr.split("##")
+                jp_expr = jp_parts[0].strip()
+                jp_reps = jp_parts[1:]
+                if not jp_expr.startswith("$"):
                     jp_expr = "$." + jp_expr
                 expr = jp_parse(jp_expr)
                 matches = [m.value for m in expr.find(target_data)]
@@ -1385,8 +1382,12 @@ def extract_values(el: Tag | dict | list | str | None, rule: str, base_url: str 
 
     out = []
     for node in current_nodes:
-        if attr in ("text", "textn", "textnodes", "owntext"):
+        if attr in ("text", "textn"):
             val = node.get_text(separator=" ", strip=True)
+        elif attr in ("textnodes", "owntext"):
+            val = "\n".join(str(c).strip() for c in node.contents if getattr(c, "name", None) is None and str(c).strip())
+            if not val:
+                val = node.get_text(separator="\n", strip=True)
         elif attr == "html":
             val = "".join(str(c) for c in node.contents).strip()
         else:
