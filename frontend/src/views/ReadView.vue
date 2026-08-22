@@ -869,14 +869,16 @@ const rendered = computed(() => {
     .join('')
 })
 
-// ── 起点风格主题配置 ─────────────────────────────────────
-type ThemeId = 'cream' | 'white' | 'eye' | 'blue' | 'night'
+// ── 起点风格主题配置（精准复刻起点官方阅读器背景色板）──
+type ThemeId = 'qidian' | 'cream' | 'eye' | 'blue' | 'pink' | 'white' | 'night'
 const THEMES: { id: ThemeId; label: string; swatchBg: string; canvasBg: string; pageBg: string; text: string }[] = [
-  { id: 'white', label: '默认白', swatchBg: '#ffffff', canvasBg: '#f6f6f6', pageBg: '#ffffff', text: '#262626' },
-  { id: 'cream', label: '羊皮纸', swatchBg: '#f5efe3', canvasBg: '#eae5d8', pageBg: '#f5efe3', text: '#332c25' },
-  { id: 'eye', label: '护眼绿', swatchBg: '#e2f2e2', canvasBg: '#d8ebd8', pageBg: '#e2f2e2', text: '#1f331f' },
-  { id: 'blue', label: '淡雅蓝', swatchBg: '#e3eff5', canvasBg: '#d7e4ea', pageBg: '#e3eff5', text: '#1c2e38' },
-  { id: 'night', label: '夜间黑', swatchBg: '#1e1e1e', canvasBg: '#141414', pageBg: '#1e1e1e', text: '#9e9e9e' },
+  { id: 'qidian', label: '经典纸白', swatchBg: '#fbf9f2', canvasBg: '#eae4d3', pageBg: '#fbf9f2', text: '#262626' },
+  { id: 'cream', label: '羊皮纸', swatchBg: '#f5edd8', canvasBg: '#e2d8c3', pageBg: '#f5edd8', text: '#33291f' },
+  { id: 'eye', label: '护眼绿', swatchBg: '#e1f0e2', canvasBg: '#cedecf', pageBg: '#e1f0e2', text: '#1a331d' },
+  { id: 'blue', label: '雅致蓝', swatchBg: '#e9eef2', canvasBg: '#d6dde3', pageBg: '#e9eef2', text: '#1c2830' },
+  { id: 'pink', label: '胭脂粉', swatchBg: '#f7eeed', canvasBg: '#ebdcdb', pageBg: '#f7eeed', text: '#331d20' },
+  { id: 'white', label: '纯净白', swatchBg: '#ffffff', canvasBg: '#ececec', pageBg: '#ffffff', text: '#222222' },
+  { id: 'night', label: '夜间黑', swatchBg: '#1c1c1f', canvasBg: '#121214', pageBg: '#1c1c1f', text: '#98989f' },
 ]
 
 const FONTS = [
@@ -886,9 +888,9 @@ const FONTS = [
 ]
 
 const FONT_MAP: Record<string, string> = {
-  sans: "'PingFang SC', 'Microsoft YaHei', sans-serif",
-  serif: "'Noto Serif SC', 'STSong', 'SimSun', serif",
-  kai: "'KaiTi', 'STKaiti', serif",
+  sans: "'PingFang SC', 'Microsoft YaHei', 'Heiti SC', sans-serif",
+  serif: "'Noto Serif SC', 'Source Han Serif SC', 'STSong', 'SimSun', serif",
+  kai: "'KaiTi', 'STKaiti', 'FZKai-Z03S', serif",
 }
 
 const PAGE_WIDTHS = [
@@ -900,11 +902,29 @@ const PAGE_WIDTHS = [
   { id: '1280', label: '1280' },
 ]
 
-const theme = ref<ThemeId>('cream')
-const fontSize = ref(18)
-const lineHeight = ref(1.9)
-const fontFamily = ref('sans')
-const pageWidth = ref('800')
+// 读取本地持久化偏好
+const savedTheme = (localStorage.getItem('reader_theme') as ThemeId) || 'qidian'
+const theme = ref<ThemeId>(THEMES.some((t) => t.id === savedTheme) ? savedTheme : 'qidian')
+const fontSize = ref(Number(localStorage.getItem('reader_font_size')) || 18)
+const lineHeight = ref(Number(localStorage.getItem('reader_line_height')) || 1.9)
+const fontFamily = ref(localStorage.getItem('reader_font_family') || 'sans')
+const pageWidth = ref(localStorage.getItem('reader_page_width') || '800')
+
+watch(theme, (val) => {
+  try { localStorage.setItem('reader_theme', val) } catch {}
+})
+watch(fontSize, (val) => {
+  try { localStorage.setItem('reader_font_size', String(val)) } catch {}
+})
+watch(lineHeight, (val) => {
+  try { localStorage.setItem('reader_line_height', String(val)) } catch {}
+})
+watch(fontFamily, (val) => {
+  try { localStorage.setItem('reader_font_family', val) } catch {}
+})
+watch(pageWidth, (val) => {
+  try { localStorage.setItem('reader_page_width', val) } catch {}
+})
 
 const pageMaxWidthStyle = computed(() => {
   if (pageWidth.value === 'auto') return '100%'
@@ -912,14 +932,14 @@ const pageMaxWidthStyle = computed(() => {
 })
 
 const readerStyleVars = computed(() => {
-  const currentTheme = THEMES.find((t) => t.id === theme.value) || THEMES[1]
+  const currentTheme = THEMES.find((t) => t.id === theme.value) || THEMES[0]
   const widthVal = pageWidth.value === 'auto' ? 800 : Number(pageWidth.value) || 800
   const dockLeftOffset = widthVal / 2 + 10
   return {
     '--qd-canvas-bg': currentTheme.canvasBg,
     '--qd-page-bg': currentTheme.pageBg,
     '--qd-text-color': currentTheme.text,
-    '--qd-font-family': FONT_MAP[fontFamily.value],
+    '--qd-font-family': FONT_MAP[fontFamily.value] || FONT_MAP.sans,
     '--qd-font-size': `${fontSize.value}px`,
     '--qd-line-height': lineHeight.value,
     '--qd-dock-left': `calc(50% + ${dockLeftOffset}px)`,
@@ -927,7 +947,15 @@ const readerStyleVars = computed(() => {
 })
 
 function toggleNightMode() {
-  theme.value = theme.value === 'night' ? 'cream' : 'night'
+  if (theme.value === 'night') {
+    const prev = (localStorage.getItem('reader_theme_prev') as ThemeId) || 'qidian'
+    theme.value = prev === 'night' ? 'qidian' : prev
+  } else {
+    try {
+      localStorage.setItem('reader_theme_prev', theme.value)
+    } catch {}
+    theme.value = 'night'
+  }
 }
 
 function scrollToTop() {
@@ -1445,22 +1473,55 @@ onUnmounted(() => {
 .qidian-page-container {
   width: 100%;
   min-height: 100vh;
-  padding: 32px 0 80px;
+  padding: 40px 0 80px;
+  display: flex;
+  justify-content: center;
 }
 
-/* ─── 中央阅读主卡片 ──────────────────────────────────────── */
+/* ─── 中央阅读主卡片（起点经典纸张质感与内边距）───────────── */
 .qidian-read-main {
   width: 100%;
   margin: 0 auto;
   background-color: var(--qd-page-bg);
-  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.06);
-  border-radius: 4px;
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.08), 0 0 1px rgba(0, 0, 0, 0.08);
+  border-radius: 2px;
   box-sizing: border-box;
-  padding: 40px 64px 64px;
+  padding: 56px 80px 80px;
   transition: max-width 0.2s ease, background-color 0.25s ease;
 }
 
+.theme-night .qidian-read-main {
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.45);
+}
+
+.theme-night .qidian-right-dock {
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.theme-night .dock-item {
+  border-bottom-color: rgba(255, 255, 255, 0.06);
+}
+
+.theme-night .chapter-meta-bar {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+  color: #777;
+}
+
+.theme-night .chapter-bottom-nav {
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+
+.theme-night .btn-qd-page {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
 @media (max-width: 768px) {
+  .qidian-page-container {
+    padding: 0 0 70px;
+  }
+
   .qidian-read-main {
     padding: 24px 18px 48px;
     margin-top: 0;
