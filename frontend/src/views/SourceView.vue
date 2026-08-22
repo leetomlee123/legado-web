@@ -875,6 +875,8 @@ onMounted(() => {
 .source-page {
   padding: 24px 28px 60px;
   max-width: 1200px;
+  width: 100%;
+  box-sizing: border-box;
   margin: 0 auto;
   display: flex;
   flex-direction: column;

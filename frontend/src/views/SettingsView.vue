@@ -474,6 +474,8 @@ onUnmounted(() => {
 .settings-page {
   padding: 28px 36px 60px;
   max-width: 780px;
+  width: 100%;
+  box-sizing: border-box;
   margin: 0 auto;
   display: flex;
   flex-direction: column;

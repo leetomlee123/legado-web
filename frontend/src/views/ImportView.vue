@@ -126,6 +126,8 @@ async function onFileChange(file: UploadFile) {
 .import-page {
   padding: 32px 28px;
   max-width: 640px;
+  width: 100%;
+  box-sizing: border-box;
   margin: 0 auto;
 }
 

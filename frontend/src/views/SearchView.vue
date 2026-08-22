@@ -494,6 +494,8 @@ onUnmounted(() => {
 /* ─── 页面容器 ────────────────────────────────────────────── */
 .search-page {
   max-width: 840px;
+  width: 100%;
+  box-sizing: border-box;
   margin: 0 auto;
   padding: 32px 24px 64px;
 }
@@ -1206,8 +1208,14 @@ onUnmounted(() => {
 
 /* ─── 移动端响应式适配 (<= 768px) ────────────────────────── */
 @media (max-width: 768px) {
+  .search-page {
+    padding: 14px 12px 36px;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
   .search-hero {
-    padding: 16px 12px 20px;
+    padding: 12px 0 16px;
   }
 
   .search-heading {

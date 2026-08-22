@@ -1,7 +1,7 @@
 <template>
-  <el-container class="layout">
+  <div class="layout">
     <!-- 桌面端侧边栏 -->
-    <el-aside width="220px" class="sidebar" role="navigation" aria-label="主导航">
+    <aside class="sidebar" role="navigation" aria-label="主导航">
       <!-- Logo -->
       <div class="logo">
         <div class="logo-icon" aria-hidden="true">
@@ -35,9 +35,9 @@
       <div class="sidebar-footer">
         <div class="footer-text">Legado Web</div>
       </div>
-    </el-aside>
+    </aside>
 
-    <el-container class="main-container">
+    <div class="main-container">
       <header class="app-header" role="banner">
         <h1 class="header-title">{{ route.meta?.title || '阅读' }}</h1>
         <div class="header-actions">
@@ -71,8 +71,8 @@
           <span class="mobile-nav-label">{{ item.label }}</span>
         </router-link>
       </nav>
-    </el-container>
-  </el-container>
+    </div>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -133,11 +133,18 @@ const navItems = [
 <style scoped>
 /* ─── 整体布局 ──────────────────────────────────────────── */
 .layout {
+  display: flex;
+  width: 100vw;
   height: 100%;
+  overflow: hidden;
+  position: relative;
 }
 
 /* ─── 侧边栏 ──────────────────────────────────────────────── */
 .sidebar {
+  width: 220px;
+  min-width: 220px;
+  max-width: 220px;
   background: var(--color-sidebar);
   display: flex;
   flex-direction: column;
@@ -145,6 +152,19 @@ const navItems = [
   position: relative;
   overflow: hidden;
   z-index: var(--z-sidebar);
+  flex-shrink: 0;
+}
+
+/* ─── 主内容区外层容器 ────────────────────────────────────── */
+.main-container {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  position: relative;
 }
 
 /* 侧边栏噪声纹理 */
@@ -275,10 +295,12 @@ const navItems = [
   background: var(--color-surface);
   border-bottom: 1px solid var(--color-border-subtle);
   height: 60px;
+  min-height: 60px;
   padding: 0 24px;
   z-index: var(--z-header);
-  position: sticky;
-  top: 0;
+  flex-shrink: 0;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .header-title {
@@ -323,8 +345,11 @@ const navItems = [
 .app-main {
   background: var(--color-bg);
   padding: 0;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   flex: 1;
+  width: 100%;
+  box-sizing: border-box;
   -webkit-overflow-scrolling: touch;
 }
 
@@ -401,17 +426,25 @@ const navItems = [
 
 /* ─── 移动端断点响应式适配 (<= 768px) ────────────────────────── */
 @media (max-width: 768px) {
+  .layout {
+    width: 100vw;
+    height: 100%;
+  }
+
   .sidebar {
     display: none !important;
   }
 
   .main-container {
-    min-height: 100vh;
     width: 100vw;
+    min-width: 100vw;
+    max-width: 100vw;
+    height: 100%;
   }
 
   .app-header {
     height: 52px;
+    min-height: 52px;
     padding: 0 16px;
   }
 
@@ -420,6 +453,7 @@ const navItems = [
   }
 
   .app-main {
+    width: 100%;
     padding-bottom: calc(58px + env(safe-area-inset-bottom, 0px));
   }
 

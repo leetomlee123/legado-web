@@ -403,6 +403,8 @@ onMounted(() => fetchBooks(true))
 .bookcase {
   padding: 24px 28px;
   max-width: 1280px;
+  width: 100%;
+  box-sizing: border-box;
   margin: 0 auto;
   min-height: 100%;
 }
