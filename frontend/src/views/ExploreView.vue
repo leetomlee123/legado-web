@@ -98,6 +98,7 @@
               />
               <div v-else class="book-cover-fallback" :style="placeholderBg(book.name)">
                 <div class="fb-spine"></div>
+                <div class="fb-border"></div>
                 <span class="fb-text">{{ (book.name || '书').slice(0, 4) }}</span>
                 <span v-if="book.author" class="fb-author">{{ book.author }}</span>
               </div>
@@ -201,6 +202,7 @@ import { ref, computed, onMounted, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchExploreSources, fetchExploreBooks, listBooks } from '@/api'
+import { getMutedCoverStyle } from '@/utils/cover'
 import http from '@/utils/http'
 import type { ExploreSource, ExploreBook, ExploreItem, Book } from '@/types'
 
@@ -233,18 +235,7 @@ const validCategories = computed<ExploreItem[]>(() => {
   return currentSource.value.exploreItems.filter(it => Boolean(it.url))
 })
 
-function placeholderBg(name: string) {
-  const hues = [25, 40, 190, 210, 280, 340, 160]
-  let hash = 0
-  for (let i = 0; i < (name || '').length; i++) {
-    hash = (hash << 5) - hash + name.charCodeAt(i)
-    hash |= 0
-  }
-  const hue = hues[Math.abs(hash) % hues.length]
-  return {
-    background: `linear-gradient(145deg, hsl(${hue}, 42%, 26%) 0%, hsl(${hue}, 35%, 15%) 100%)`,
-  }
-}
+const placeholderBg = getMutedCoverStyle
 
 async function loadShelfBooks() {
   try {
@@ -599,22 +590,34 @@ onMounted(() => {
   left: 5px;
   top: 0;
   bottom: 0;
-  width: 2px;
-  background: rgba(255, 255, 255, 0.2);
+  width: 2.5px;
+  background: var(--cover-spine, rgba(90, 78, 64, 0.09));
+  border-right: 1px solid rgba(255, 255, 255, 0.5);
+}
+
+.fb-border {
+  position: absolute;
+  inset: 6px 6px 6px 9px;
+  border: 1px solid var(--cover-border, rgba(90, 78, 64, 0.14));
+  border-radius: 3px;
+  pointer-events: none;
 }
 
 .fb-text {
-  font-family: var(--font-serif, serif);
+  font-family: var(--font-serif, "'Noto Serif SC', 'Songti SC', 'SimSun', serif");
   font-size: 14px;
   font-weight: 700;
-  color: rgba(255, 248, 220, 0.95);
+  color: var(--cover-text, #363028);
+  letter-spacing: 0.06em;
   line-height: 1.3;
+  z-index: 1;
 }
 
 .fb-author {
   font-size: 10px;
-  color: rgba(255, 248, 220, 0.7);
-  margin-top: 4px;
+  color: var(--cover-sub, #7c7365);
+  margin-top: 5px;
+  z-index: 1;
 }
 
 .kind-tag {

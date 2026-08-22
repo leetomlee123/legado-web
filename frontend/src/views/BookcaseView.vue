@@ -212,10 +212,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { listBooks, coverUrl, deleteBook, batchDeleteBooks } from '@/api'
+import { getMutedCoverStyle } from '@/utils/cover'
 import type { Book } from '@/types'
 
 const router = useRouter()
@@ -348,25 +349,8 @@ async function confirmBatchDelete() {
   }
 }
 
-// ── 基于书名生成不重复的暖色渐变 ─────────────────────────
-const GRADIENTS = [
-  ['#c0692e', '#8b3a10'], // 棕红
-  ['#2e7d6e', '#1a4a42'], // 墨绿
-  ['#b8863a', '#7a5520'], // 金棕
-  ['#5c4a8a', '#3a2e5c'], // 深紫（偏蓝）
-  ['#2e6b8a', '#1a3d52'], // 深蓝
-  ['#8a4a2e', '#5c2810'], // 赭石
-  ['#4a7a3a', '#2c4e22'], // 苔绿
-  ['#7a4a6a', '#4e2842'], // 烟紫
-]
-
-function placeholderStyle(name: string): Record<string, string> {
-  const idx = name.charCodeAt(0) % GRADIENTS.length
-  const [from, to] = GRADIENTS[idx]
-  return {
-    background: `linear-gradient(145deg, ${from}, ${to})`,
-  }
-}
+// ── 基于书名生成素净典雅的封面配色 ─────────────────────
+const placeholderStyle = getMutedCoverStyle
 
 async function fetchBooks(reset = false) {
   if (reset) {
@@ -803,25 +787,24 @@ onMounted(() => fetchBooks(true))
   left: 6px;
   top: 0;
   bottom: 0;
-  width: 2px;
-  background: rgba(255, 255, 255, 0.18);
-  box-shadow: 1px 0 2px rgba(0, 0, 0, 0.25);
+  width: 2.5px;
+  background: var(--cover-spine, rgba(90, 78, 64, 0.09));
+  border-right: 1px solid rgba(255, 255, 255, 0.5);
 }
 
 .placeholder-border {
   position: absolute;
   inset: 7px 7px 7px 11px;
-  border: 1px solid rgba(255, 248, 220, 0.28);
+  border: 1px solid var(--cover-border, rgba(90, 78, 64, 0.14));
   border-radius: 3px;
   pointer-events: none;
 }
 
 .placeholder-text {
-  font-family: var(--font-serif, "'Noto Serif SC', 'Songti SC', serif");
+  font-family: var(--font-serif, "'Noto Serif SC', 'Songti SC', 'SimSun', serif");
   font-size: 15px;
   font-weight: 700;
-  color: rgba(255, 248, 220, 0.95);
-  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  color: var(--cover-text, #363028);
   letter-spacing: 0.08em;
   line-height: 1.35;
   display: -webkit-box;
@@ -832,8 +815,8 @@ onMounted(() => fetchBooks(true))
 }
 
 .placeholder-author {
-  font-size: 10px;
-  color: rgba(255, 248, 220, 0.7);
+  font-size: 10.5px;
+  color: var(--cover-sub, #7c7365);
   margin-top: 6px;
   white-space: nowrap;
   overflow: hidden;

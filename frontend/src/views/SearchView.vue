@@ -343,6 +343,7 @@ import { storeToRefs } from 'pinia'
 import { ElMessage } from 'element-plus'
 import { useSearchStore } from '@/stores/search'
 import { initBookPreview } from '@/api'
+import { getMutedCoverStyle } from '@/utils/cover'
 import type { Book } from '@/types'
 
 const router = useRouter()
@@ -423,21 +424,7 @@ function generateUUID(): string {
   })
 }
 
-const GRADIENTS = [
-  ['#c0692e', '#8b3a10'],
-  ['#2e7d6e', '#1a4a42'],
-  ['#b8863a', '#7a5520'],
-  ['#5c4a8a', '#3a2e5c'],
-  ['#2e6b8a', '#1a3d52'],
-  ['#8a4a2e', '#5c2810'],
-]
-
-function resultPlaceholderStyle(name: string): Record<string, string> {
-  const str = name || '书'
-  const idx = str.charCodeAt(0) % GRADIENTS.length
-  const [from, to] = GRADIENTS[idx]
-  return { background: `linear-gradient(145deg, ${from}, ${to})` }
-}
+const resultPlaceholderStyle = getMutedCoverStyle
 
 async function open(book: Book) {
   const bookAny = book as any
@@ -1022,10 +1009,12 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: rgba(255, 248, 220, 0.9);
+  color: var(--cover-text, #363028);
+  font-family: var(--font-serif, "'Noto Serif SC', 'Songti SC', 'SimSun', serif");
   font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.03em;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  border: 1px solid var(--cover-border, rgba(90, 78, 64, 0.14));
 }
 
 .r-info {

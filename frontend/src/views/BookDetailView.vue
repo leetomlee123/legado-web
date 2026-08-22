@@ -77,6 +77,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { getMutedCoverStyle } from '@/utils/cover'
 import type { Book } from '@/types'
 
 const route = useRoute()
@@ -105,20 +106,7 @@ onMounted(() => {
   }
 })
 
-const GRADIENTS = [
-  ['#c0692e', '#8b3a10'],
-  ['#2e7d6e', '#1a4a42'],
-  ['#b8863a', '#7a5520'],
-  ['#5c4a8a', '#3a2e5c'],
-  ['#2e6b8a', '#1a3d52'],
-  ['#8a4a2e', '#5c2810'],
-]
-
-function placeholderStyle(name: string): Record<string, string> {
-  const idx = (name || '').charCodeAt(0) % GRADIENTS.length
-  const [from, to] = GRADIENTS[idx]
-  return { background: `linear-gradient(145deg, ${from}, ${to})` }
-}
+const placeholderStyle = getMutedCoverStyle
 
 async function addAndRead() {
   if (adding.value) return
@@ -218,10 +206,12 @@ async function addAndRead() {
   display: flex;
   align-items: center;
   justify-content: center;
+  font-family: var(--font-serif, "'Noto Serif SC', 'Songti SC', 'SimSun', serif");
   font-size: 22px;
   font-weight: 700;
-  color: rgba(255, 248, 220, 0.9);
-  letter-spacing: 0.04em;
+  color: var(--cover-text, #363028);
+  letter-spacing: 0.06em;
+  border: 1px solid var(--cover-border, rgba(90, 78, 64, 0.14));
 }
 
 .detail-meta {
