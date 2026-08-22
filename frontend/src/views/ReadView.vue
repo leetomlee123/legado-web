@@ -159,11 +159,11 @@
         id="reader-main"
         :style="{ maxWidth: pageMaxWidthStyle }"
       >
-        <!-- 第一阶段：正在解析章节列表 Loading -->
-        <div v-if="loadingToc" class="qidian-loading-toc" role="status" aria-live="polite">
+        <!-- 第一阶段：正在解析章节列表 Loading（仅在无任何章节数据时展示） -->
+        <div v-if="loadingToc && (!chapters || !chapters.length)" class="qidian-loading-toc" role="status" aria-live="polite">
           <div class="qd-spinner"></div>
-          <div class="qd-loading-title">正在解析章节列表</div>
-          <div class="qd-loading-sub">正在从书源实时检索目录，请稍候...</div>
+          <div class="qd-loading-title">正在加载章节列表</div>
+          <div class="qd-loading-sub">首次打开或初始化书籍，请稍候...</div>
         </div>
 
         <!-- 目录解析错误 -->
@@ -970,53 +970,101 @@ async function initBookAndChapters(targetIndex?: number, forceRefresh: boolean =
     return
   }
 
-  // 1. 获取书籍信息
-  try {
-    const b = await getBook(idOrUuid)
-    currentBook.value = b
-  } catch (e: any) {
-    console.warn('获取书籍信息失败:', e)
+  // 1. 同步读取本地存储的阅读记录（0ms 立即就绪）
+  let localProgressIndex = 0
+  let hasLocalProgress = false
+  if (typeof targetIndex === 'number' && targetIndex >= 0) {
+    localProgressIndex = targetIndex
+    hasLocalProgress = true
+  } else {
+    const local = localStorage.getItem(`read_progress_${idOrUuid}`)
+    if (local) {
+      try {
+        const parsed = JSON.parse(local)
+        if (parsed && typeof parsed.index === 'number' && parsed.index >= 0) {
+          localProgressIndex = parsed.index
+          hasLocalProgress = true
+        }
+      } catch {}
+    }
   }
 
-  // 2. 解析章节列表（第一阶段 Loading）
-  loadingToc.value = true
-  tocError.value = ''
-  try {
-    const list = await listChapters(idOrUuid)
-    if (!list || !list.length) {
-      throw new Error('未获取到章节目录，请检查书源是否有效')
-    }
-    chapters.value = list
-    loadingToc.value = false
-
-    // 3. 读取历史阅读记录并恢复
-    let initialIndex = 0
-    if (typeof targetIndex === 'number' && targetIndex >= 0 && targetIndex < list.length) {
-      initialIndex = targetIndex
-    } else {
+  // 2. 尝试从 sessionStorage 秒级恢复章节目录缓存（避免每次从书架进入都等待目录加载）
+  let hasCachedToc = false
+  if (!forceRefresh) {
+    const cachedTocStr = sessionStorage.getItem(`toc_cache_${idOrUuid}`)
+    if (cachedTocStr) {
       try {
-        const prog = await getReadProgress(idOrUuid)
-        if (prog && typeof prog.chapterIndex === 'number' && prog.chapterIndex >= 0 && prog.chapterIndex < list.length) {
-          initialIndex = prog.chapterIndex
-        } else {
-          const local = localStorage.getItem(`read_progress_${idOrUuid}`)
-          if (local) {
-            const parsed = JSON.parse(local)
-            if (parsed && typeof parsed.index === 'number' && parsed.index < list.length) {
-              initialIndex = parsed.index
-            }
-          }
+        const cachedList = JSON.parse(cachedTocStr)
+        if (Array.isArray(cachedList) && cachedList.length > 0) {
+          chapters.value = cachedList
+          hasCachedToc = true
+          loadingToc.value = false
         }
-      } catch (e) {
-        console.debug('读取阅读进度失败:', e)
-      }
+      } catch {}
+    }
+  }
+
+  // 如果无缓存目录且当前无章节，才开启目录 Loading 态
+  if (!hasCachedToc && (!chapters.value || chapters.value.length === 0)) {
+    loadingToc.value = true
+  }
+  tocError.value = ''
+
+  // 3. 若已有章节缓存，立即发起正文加载（实现零延迟秒开阅读！）
+  if (chapters.value && chapters.value.length > 0) {
+    const safeIdx = Math.min(localProgressIndex, chapters.value.length - 1)
+    chapterIndex.value = safeIdx
+    loadChapterContentByIndex(safeIdx, forceRefresh).catch(() => {})
+  }
+
+  // 4. 并发发起所有后台元数据请求（书籍详情、最新目录、服务端进度）
+  try {
+    const [bookRes, listRes, progRes] = await Promise.allSettled([
+      getBook(idOrUuid),
+      listChapters(idOrUuid),
+      getReadProgress(idOrUuid),
+    ])
+
+    // 更新书籍元数据
+    if (bookRes.status === 'fulfilled' && bookRes.value) {
+      currentBook.value = bookRes.value
     }
 
-    // 4. 解析目标章节数据（第二阶段 Loading，强制重新请求正文）
-    await loadChapterContentByIndex(initialIndex, forceRefresh)
+    // 更新章节目录列表
+    if (listRes.status === 'fulfilled' && Array.isArray(listRes.value) && listRes.value.length > 0) {
+      const newList = listRes.value
+      chapters.value = newList
+      loadingToc.value = false
+      try {
+        sessionStorage.setItem(`toc_cache_${idOrUuid}`, JSON.stringify(newList))
+      } catch {}
+
+      // 确定最终目标章节索引
+      let finalIndex = localProgressIndex
+      if (progRes.status === 'fulfilled' && progRes.value && typeof progRes.value.chapterIndex === 'number') {
+        const serverIdx = progRes.value.chapterIndex
+        if (serverIdx >= 0 && serverIdx < newList.length && !hasLocalProgress) {
+          finalIndex = serverIdx
+        }
+      }
+      finalIndex = Math.min(Math.max(0, finalIndex), newList.length - 1)
+
+      // 若正文尚未加载（如首次无缓存进入）或换源强制刷新，拉取正文
+      if (!content.value || forceRefresh) {
+        await loadChapterContentByIndex(finalIndex, forceRefresh)
+      }
+    } else if (!chapters.value || chapters.value.length === 0) {
+      const err = listRes.status === 'rejected' ? listRes.reason : new Error('未获取到章节目录，请检查书源是否有效')
+      throw err
+    }
   } catch (e: any) {
+    if (!chapters.value || chapters.value.length === 0) {
+      loadingToc.value = false
+      tocError.value = e.message || '章节列表解析失败'
+    }
+  } finally {
     loadingToc.value = false
-    tocError.value = e.message || '章节列表解析失败'
   }
 }
 
@@ -1250,6 +1298,9 @@ async function onSelectSwitchSource(item: CandidateSourceItem) {
       currentBook.value = res.book
       contentCache.value.clear()
       preloadingSet.clear()
+      try {
+        sessionStorage.removeItem(`toc_cache_${identifier.value}`)
+      } catch {}
       content.value = ''
       showChangeSource.value = false
       ElMessage.success(res.message || `已成功切换至【${item.sourceName}】`)
