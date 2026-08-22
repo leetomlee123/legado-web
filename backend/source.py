@@ -610,8 +610,13 @@ def convert_jsoup_to_css(sel: str) -> str:
     s = (sel or "").strip()
     if not s:
         return ""
+    # 处理 class.name1 name2 name3 包含空格的多类名
+    s = re.sub(
+        r"(?:^|[\s>+~,])class\.([a-zA-Z0-9_\-\s]+?)(?=[>+~,\.\[\:]|$)",
+        lambda m: "." + ".".join(m.group(1).split()),
+        s,
+    )
     s = re.sub(r"(?:^|[\s>+~,])tag\.([a-zA-Z0-9_\-]+)", lambda m: m.group(0).replace("tag.", ""), s)
-    s = re.sub(r"(?:^|[\s>+~,])class\.([a-zA-Z0-9_\-]+)", lambda m: m.group(0).replace("class.", "."), s)
     s = re.sub(r"(?:^|[\s>+~,])id\.([a-zA-Z0-9_\-]+)", lambda m: m.group(0).replace("id.", "#"), s)
     return s.strip()
 
@@ -692,6 +697,19 @@ def safe_select(el: Tag, selector: str) -> list[Tag]:
         for p in parts:
             out.extend(safe_select(el, p))
         return out
+
+    # 支持 @ 分层级联选择（例如 class.col-sm-6 chapter-list@a）
+    if "@" in selector:
+        segments = [s.strip() for s in selector.split("@") if s.strip()]
+        current = [el]
+        for seg in segments:
+            next_nodes = []
+            for node in current:
+                next_nodes.extend(safe_select(node, seg))
+            current = next_nodes
+            if not current:
+                break
+        return current
 
     base, pos_idx, slice_args, excl_idx = _strip_js_pos_and_slice(selector)
     if not base:
@@ -1028,8 +1046,8 @@ def extract_values(el: Tag | None, rule: str, base_url: str = "") -> list[str]:
     """
     通用值提取引擎，支持：
     1. XPath (//a[...] / /select/option/...)
-    2. Legado 级联属性选择器 (id.info@tag.p.0@text, class.next@tag.a@href, option@value)
-    3. 多值列表展开与 ## 正则替换
+    2. Legado 级联属性选择器 (id.info@tag.p.0@text, class.next@tag.a@href, onclick##...##$1, option@value)
+    3. 多值列表展开与 ## 正则替换及 $1 分组反向引用
     """
     if el is None:
         return []
@@ -1073,16 +1091,26 @@ def extract_values(el: Tag | None, rule: str, base_url: str = "") -> list[str]:
                 return res
         return []
 
-    # 解析 @ 分段链路（例如 id.info@tag.p.0@text 或 class.next@tag.a@href 或 option@value）
-    segments = [s.strip() for s in base_rule.split("@") if s.strip()] if "@" in base_rule else [base_rule]
-    attr_names = {"text", "textn", "textnodes", "owntext", "html", "href", "src", "value", "content", "data-src", "id", "class", "title", "alt"}
+    # 解析 @ 分段链路（例如 id.info@tag.p.0@text 或 class.next@tag.a@href 或 onclick 或 option@value）
+    segments = [s.strip() for s in base_rule.split("@") if s.strip()] if "@" in base_rule else ([base_rule] if base_rule else [])
 
     attr = "text"
-    if segments and segments[-1].lower() in attr_names:
-        attr = segments[-1].lower()
-        selector_chain = segments[:-1]
+    selector_chain = []
+
+    if not segments:
+        attr = "text"
+    elif len(segments) == 1:
+        seg = segments[0]
+        seg_lower = seg.lower()
+        if el.has_attr(seg):
+            attr = seg
+        elif seg_lower in ("text", "textn", "textnodes", "owntext", "html", "href", "src", "value", "onclick", "title", "alt", "id", "class", "content", "data-src", "data-url"):
+            attr = seg_lower
+        else:
+            selector_chain = segments
     else:
-        selector_chain = segments
+        attr = segments[-1]
+        selector_chain = segments[:-1]
 
     current_nodes = [el]
     for sel in selector_chain:
@@ -1104,15 +1132,35 @@ def extract_values(el: Tag | None, rule: str, base_url: str = "") -> list[str]:
             if isinstance(v, list):
                 v = v[0] if v else ""
             val = str(v).strip()
-            if attr in ("href", "src", "value") and base_url and val and not (val.startswith("http://") or val.startswith("https://")):
+            if attr in ("href", "src", "value", "data-src", "data-url") and base_url and val and not (val.startswith("http://") or val.startswith("https://") or val.startswith("javascript:")):
                 val = urllib.parse.urljoin(base_url, val)
             if attr in ("href", "src", "value") and val:
                 val = normalize_source_url(val)
 
-        # 执行 ## 正则替换
+        # 执行 ## 正则替换并支持 $1, $2 分组反向引用
         for i in range(0, len(replacements), 2):
-            pattern = replacements[i]
+            pattern = replacements[i].strip()
+            if not pattern:
+                continue
             repl = replacements[i + 1] if i + 1 < len(replacements) else ""
+            # 将 $1, $2 转换为 \g<1>, \g<2>
+            def _fix_dollar(r_str: str) -> str:
+                out_r = ""
+                k = 0
+                while k < len(r_str):
+                    if r_str[k] == "$" and k + 1 < len(r_str) and r_str[k + 1].isdigit():
+                        m = k + 1
+                        while m < len(r_str) and r_str[m].isdigit():
+                            m += 1
+                        num = r_str[k + 1 : m]
+                        out_r += "\\g<" + num + ">"
+                        k = m
+                    else:
+                        out_r += r_str[k]
+                        k += 1
+                return out_r
+
+            repl = _fix_dollar(repl)
             try:
                 val = re.sub(pattern, repl, val)
             except Exception:
@@ -1120,6 +1168,9 @@ def extract_values(el: Tag | None, rule: str, base_url: str = "") -> list[str]:
 
         val = val.strip()
         if val:
+            if base_url and not (val.startswith("http://") or val.startswith("https://") or val.startswith("javascript:")):
+                if val.startswith("/") or val.startswith("./") or val.startswith("../") or ".html" in val or ".php" in val:
+                    val = urllib.parse.urljoin(base_url, val)
             out.append(val)
     return out
 

@@ -198,6 +198,32 @@ def test_explore_url_parsing_and_resolution():
     assert u2 == "https://test.com/sort/1/2.html"
 
 
+def test_multiclass_selector_and_onclick_extraction():
+    from bs4 import BeautifulSoup
+    from source import safe_select, extract_values
+
+    html = """
+    <dl class="panel-body panel-chapterlist panel-body-fa63f2a3">
+      <dd class="col-sm-6 col-md-3 chapter-fa63f2a3">
+        <a href="javascript:;" onclick="location.href='/tv/51744/578.html'">第四卷 风起海外 第五百零三章 凌玉灵</a>
+      </dd>
+      <dd class="col-sm-6 col-md-3 chapter-fa63f2a3">
+        <a href="javascript:;" onclick="location.href='/tv/51744/579.html'">第四卷 风起海外 第五百零四章 传送与条件</a>
+      </dd>
+    </dl>
+    """
+    soup = BeautifulSoup(html, "lxml")
+    nodes = safe_select(soup, "class.col-sm-6 col-md-3 chapter-fa63f2a3@a")
+    assert len(nodes) == 2, f"Expected 2 nodes, got {len(nodes)}"
+
+    rule = "onclick##.+'(.+)'##$1###"
+    url1 = extract_values(nodes[0], rule, base_url="https://www.lysw1.com/tv/51744/6/")[0]
+    assert url1 == "https://www.lysw1.com/tv/51744/578.html", f"Got: {url1}"
+
+    title1 = extract_values(nodes[0], "text")[0]
+    assert "第五百零三章" in title1
+
+
 if __name__ == "__main__":
     test_parse_chapters()
     test_parse_chapters_fallback()
@@ -212,5 +238,7 @@ if __name__ == "__main__":
     test_m_to_www_conversion()
     test_js_dynamic_base64_content_preprocessing()
     test_explore_url_parsing_and_resolution()
+    test_multiclass_selector_and_onclick_extraction()
     print("All test_book.py tests passed successfully!")
+
 
