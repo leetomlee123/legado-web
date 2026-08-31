@@ -82,6 +82,14 @@
 - 支持配置 HTTP / HTTPS / SOCKS5 全局网络代理。
 - 内置一键代理连通性、出口 IP 与网络延迟测试工具。
 
+### 8. 🔊 沉浸式文本转语音（TTS）
+- 段落级 TTS 朗读悬浮播放器，随阅读进度同步高亮当前段落。
+- 支持语速、音色、定时关机与段落点读切换。
+
+### 9. 📲 渐进式 Web 应用（PWA）
+- 完整离线缓存（service worker）与安装到桌面。
+- 秒开秒读体验，与本地阅读进度协同。
+
 ---
 
 ## 🚀 快速开始
@@ -201,6 +209,7 @@ legado-web/
 │   │   │   ├── ReadView.vue       # 起点风格核心阅读器
 │   │   │   ├── SearchView.vue     # 多源流式搜索视图
 │   │   │   ├── ExploreView.vue    # 书源探索与分类榜单
+│   │   │   ├── BookDetailView.vue # 书籍详情
 │   │   │   ├── SourceView.vue     # 书源列表、管理与测速
 │   │   │   ├── ImportView.vue     # 书源与本地书籍导入
 │   │   │   ├── SettingsView.vue   # 定时刷新、代理与系统设置
