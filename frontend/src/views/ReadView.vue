@@ -2411,7 +2411,6 @@ onUnmounted(() => {
 }
 
 .qd-toc-cell:hover {
-  background-color: rgba(237, 66, 75, 0.06);
   color: #ed424b;
 }
 
@@ -3153,9 +3152,6 @@ onUnmounted(() => {
   transition: background 0.2s ease, box-shadow 0.2s ease;
 }
 
-.chapter-para:hover {
-  background: rgba(184, 134, 58, 0.04);
-}
 
 .tts-active-para {
   background: rgba(200, 152, 58, 0.16) !important;
