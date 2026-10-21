@@ -1,8 +1,131 @@
 <template>
   <section class="settings-page" aria-label="应用系统设置">
     <div class="page-header">
-      <h2 class="page-title">系统与爬虫设置</h2>
-      <p class="page-subtitle">配置网络代理、并发参数、搜索超时及书源健康度自动巡检</p>
+      <h2 class="page-title">系统与偏好设置</h2>
+      <p class="page-subtitle">管理个人账号、多用户注册、网络代理、并发参数及书源健康度巡检</p>
+    </div>
+
+    <!-- ── 个人账户与安全设置 ──────────────────────────────── -->
+    <div class="settings-card user-account-card">
+      <div class="card-header">
+        <div class="card-icon" style="background: rgba(200, 152, 58, 0.15); color: #c8983a;" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+            <circle cx="12" cy="7" r="4"></circle>
+          </svg>
+        </div>
+        <div style="flex: 1;">
+          <div class="card-title-row">
+            <div class="card-title">个人账户与安全</div>
+            <el-tag size="small" :type="authStore.isAdmin ? 'warning' : 'info'">
+              {{ authStore.isAdmin ? '系统管理员' : '普通读者' }}
+            </el-tag>
+          </div>
+          <p class="card-desc">管理当前登录账号与安全密码。</p>
+        </div>
+      </div>
+
+      <div class="user-profile-row">
+        <div class="user-profile-meta">
+          <div class="user-big-avatar">
+            {{ (authStore.displayName || '用').slice(0, 1).toUpperCase() }}
+          </div>
+          <div class="user-meta-details">
+            <div class="user-meta-name">{{ authStore.displayName }}</div>
+            <div class="user-meta-sub">用户名：{{ authStore.user?.username }}</div>
+          </div>
+        </div>
+        <div class="user-profile-actions">
+          <button class="action-btn-outline" @click="showPasswordDialog = true">
+            修改密码
+          </button>
+          <button class="action-btn-danger" @click="handleLogout">
+            退出登录
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 多用户与开放注册管理（仅管理员可见） ──────────────────── -->
+    <div v-if="authStore.isAdmin" class="settings-card">
+      <div class="card-header">
+        <div class="card-icon" style="background: rgba(64, 158, 255, 0.15); color: #409eff;" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+            <circle cx="9" cy="7" r="4"></circle>
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+            <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+          </svg>
+        </div>
+        <div style="flex: 1;">
+          <div class="card-title-row">
+            <div class="card-title">多用户与开放注册管理</div>
+            <el-tag size="small" :type="allowRegistration ? 'success' : 'danger'">
+              {{ allowRegistration ? '开放注册中' : '注册已暂停' }}
+            </el-tag>
+          </div>
+          <p class="card-desc">控制系统是否允许新用户自主注册，并管理全站用户与独立数据隔离。</p>
+        </div>
+      </div>
+
+      <!-- 开放注册开关 -->
+      <div class="field-group-inline">
+        <div>
+          <div class="field-label">允许新用户自主注册</div>
+          <span class="field-hint">开启后任何人均可在登录页面注册账号；关闭后仅允许已有账号登录。</span>
+        </div>
+        <el-switch
+          v-model="allowRegistration"
+          :loading="togglingRegistration"
+          @change="handleToggleRegistration"
+        />
+      </div>
+
+      <!-- 用户列表 -->
+      <div class="field-group" style="margin-top: 16px;">
+        <div class="field-title-row" style="margin-bottom: 12px;">
+          <label class="field-label">全站用户列表 (共 {{ userList.length }} 人)</label>
+          <button class="chip-btn" :disabled="loadingUsers" @click="loadUsers">
+            {{ loadingUsers ? '刷新中...' : '刷新列表' }}
+          </button>
+        </div>
+
+        <el-table :data="userList" stripe style="width: 100%" v-loading="loadingUsers">
+          <el-table-column prop="id" label="UID" width="70" />
+          <el-table-column prop="username" label="用户名" min-width="120" />
+          <el-table-column prop="nickname" label="昵称" min-width="120">
+            <template #default="{ row }">
+              {{ row.nickname || '-' }}
+            </template>
+          </el-table-column>
+          <el-table-column prop="role" label="权限角色" width="110">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.role === 'admin' ? 'warning' : 'info'">
+                {{ row.role === 'admin' ? '管理员' : '读者' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="create_time" label="注册时间" min-width="170">
+            <template #default="{ row }">
+              {{ formatTime(row.create_time) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="100" fixed="right">
+            <template #default="{ row }">
+              <el-button
+                v-if="row.id !== authStore.user?.id"
+                type="danger"
+                link
+                size="small"
+                @click="handleDeleteUser(row)"
+              >
+                删除用户
+              </el-button>
+              <span v-else style="color: rgba(255,255,255,0.3); font-size: 12px;">当前账号</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
     </div>
 
     <!-- ── 性能与并发参数配置 ──────────────────────────────── -->
@@ -426,12 +549,62 @@
         </div>
       </div>
     </div>
+
+    <!-- ── 修改密码对话框 ──────────────────────────────── -->
+    <el-dialog
+      v-model="showPasswordDialog"
+      title="修改登录密码"
+      width="420px"
+      append-to-body
+      destroy-on-close
+    >
+      <el-form :model="passwordForm" label-position="top">
+        <el-form-item label="当前原密码">
+          <el-input
+            v-model="passwordForm.oldPassword"
+            type="password"
+            placeholder="请输入当前账号原密码"
+            show-password
+          />
+        </el-form-item>
+        <el-form-item label="新密码 (不少于 6 位)">
+          <el-input
+            v-model="passwordForm.newPassword"
+            type="password"
+            placeholder="请输入新密码"
+            show-password
+          />
+        </el-form-item>
+        <el-form-item label="确认新密码">
+          <el-input
+            v-model="passwordForm.confirmPassword"
+            type="password"
+            placeholder="请再次输入新密码"
+            show-password
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showPasswordDialog = false">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="changingPassword"
+          :disabled="!passwordForm.oldPassword || !passwordForm.newPassword"
+          @click="handleChangePassword"
+        >
+          确认修改
+        </el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
-import { ElMessage, ElNotification } from 'element-plus'
+import { onMounted, onUnmounted, ref, reactive } from 'vue'
+import { useRouter } from 'vue-router'
+import { ElMessage, ElNotification, ElMessageBox } from 'element-plus'
+import { useAuthStore } from '@/stores/auth'
+import type { User } from '@/types'
 import {
   getSettings,
   saveSettings,
@@ -441,10 +614,139 @@ import {
   testProxy,
   getBookshelfRefreshStatus,
   runBookshelfRefresh,
+  listAdminUsers,
+  deleteAdminUser,
+  toggleAdminRegistration,
   type HealthStatusRes,
   type ProxyTestResult,
   type BookshelfRefreshStatus,
 } from '@/api'
+
+const router = useRouter()
+const authStore = useAuthStore()
+
+// 用户与注册状态
+const allowRegistration = ref(true)
+const togglingRegistration = ref(false)
+const userList = ref<User[]>([])
+const loadingUsers = ref(false)
+
+// 修改密码
+const showPasswordDialog = ref(false)
+const changingPassword = ref(false)
+const passwordForm = reactive({
+  oldPassword: '',
+  newPassword: '',
+  confirmPassword: '',
+})
+
+function formatTime(ts?: number) {
+  if (!ts) return '-'
+  const d = new Date(ts)
+  return d.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+async function loadAuthInfo() {
+  const status = await authStore.fetchStatus()
+  allowRegistration.value = status.allowRegistration
+  if (authStore.isAdmin) {
+    loadUsers()
+  }
+}
+
+async function loadUsers() {
+  if (!authStore.isAdmin) return
+  loadingUsers.value = true
+  try {
+    userList.value = await listAdminUsers()
+  } catch (e: any) {
+    ElMessage.error(e.message || '获取用户列表失败')
+  } finally {
+    loadingUsers.value = false
+  }
+}
+
+async function handleToggleRegistration(val: any) {
+  togglingRegistration.value = true
+  try {
+    const res = await toggleAdminRegistration(Boolean(val))
+    allowRegistration.value = res.allowRegistration
+    ElMessage.success(res.allowRegistration ? '已开启新用户开放注册' : '已关闭新用户自主注册')
+  } catch (e: any) {
+    allowRegistration.value = !val
+    ElMessage.error(e.message || '修改注册配置失败')
+  } finally {
+    togglingRegistration.value = false
+  }
+}
+
+async function handleDeleteUser(user: User) {
+  try {
+    await ElMessageBox.confirm(`确定要彻底删除用户「${user.username}」吗？其书架与阅读记录将被一并清理。`, '警告', {
+      confirmButtonText: '确认删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+    await deleteAdminUser(user.id)
+    ElMessage.success('用户删除成功')
+    loadUsers()
+  } catch {
+    // cancelled
+  }
+}
+
+async function handleChangePassword() {
+  if (!passwordForm.oldPassword) {
+    ElMessage.warning('请输入当前原密码')
+    return
+  }
+  if (passwordForm.newPassword.length < 6) {
+    ElMessage.warning('新密码长度不能少于 6 位')
+    return
+  }
+  if (passwordForm.newPassword !== passwordForm.confirmPassword) {
+    ElMessage.warning('两次输入的新密码不一致')
+    return
+  }
+
+  changingPassword.value = true
+  try {
+    await authStore.changePassword({
+      oldPassword: passwordForm.oldPassword,
+      newPassword: passwordForm.newPassword,
+    })
+    ElMessage.success('密码修改成功，请牢记新密码')
+    showPasswordDialog.value = false
+    passwordForm.oldPassword = ''
+    passwordForm.newPassword = ''
+    passwordForm.confirmPassword = ''
+  } catch (e: any) {
+    ElMessage.error(e.message || '修改密码失败')
+  } finally {
+    changingPassword.value = false
+  }
+}
+
+async function handleLogout() {
+  try {
+    await ElMessageBox.confirm('确定要退出当前登录账号吗？', '提示', {
+      confirmButtonText: '退出登录',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+    await authStore.logout()
+    ElMessage.success('已安全退出登录')
+    router.push('/login')
+  } catch {
+    // cancelled
+  }
+}
 
 const proxy = ref('')
 const proxyEnabled = ref(false)
@@ -607,6 +909,7 @@ async function save() {
 }
 
 onMounted(() => {
+  loadAuthInfo()
   loadSettings()
   loadHealthStatus()
   loadBookshelfRefreshStatus()
@@ -1073,6 +1376,90 @@ onUnmounted(() => {
 
 .about-card {
   opacity: 0.85;
+}
+
+/* ─── 个人账户与安全卡片样式 ────────────────────────── */
+.user-profile-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 12px 16px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.user-profile-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.user-big-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #d4a34b 0%, #a67222 100%);
+  color: #17120e;
+  font-weight: 700;
+  font-size: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 12px rgba(200, 152, 58, 0.3);
+}
+
+.user-meta-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-text-primary, #f5eedb);
+}
+
+.user-meta-sub {
+  font-size: 12px;
+  color: var(--color-text-secondary, rgba(245, 238, 219, 0.6));
+  margin-top: 4px;
+}
+
+.user-profile-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.action-btn-outline {
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 6px;
+  border: 1px solid rgba(200, 152, 58, 0.4);
+  background: rgba(200, 152, 58, 0.1);
+  color: #f5eedb;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.action-btn-outline:hover {
+  background: rgba(200, 152, 58, 0.2);
+  border-color: #c8983a;
+}
+
+.action-btn-danger {
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 77, 79, 0.4);
+  background: rgba(255, 77, 79, 0.1);
+  color: #ff9c9e;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.action-btn-danger:hover {
+  background: rgba(255, 77, 79, 0.2);
+  border-color: #ff4d4f;
 }
 
 /* ─── 移动端响应式适配 (<= 768px) ────────────────────────── */

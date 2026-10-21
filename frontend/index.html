@@ -32,6 +32,19 @@
       href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Noto+Serif+SC:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
+    <!-- 初始化防闪烁：提前读取阅读器主题类名 -->
+    <script>
+      (function() {
+        try {
+          var t = localStorage.getItem('reader_theme') || localStorage.getItem('reader-theme');
+          if (t === 'night') {
+            document.documentElement.classList.add('theme-night');
+          } else if (t === 'eye') {
+            document.documentElement.classList.add('theme-green');
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

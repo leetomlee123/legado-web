@@ -64,10 +64,35 @@ const router = createRouter({
       meta: { title: '阅读' },
     },
     {
+      path: '/login',
+      name: 'login',
+      component: () => import('@/views/LoginView.vue'),
+      meta: { title: '登录' },
+    },
+    {
       path: '/:pathMatch(.*)*',
       redirect: '/',
     },
   ],
+})
+
+router.beforeEach(async (to, from, next) => {
+  const token = localStorage.getItem('auth_token')
+  if (to.name === 'login') {
+    if (token) {
+      next('/')
+      return
+    }
+    next()
+    return
+  }
+
+  if (!token) {
+    next({ name: 'login', query: { redirect: to.fullPath } })
+    return
+  }
+
+  next()
 })
 
 router.afterEach((to) => {

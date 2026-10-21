@@ -5,3 +5,5 @@ lxml>=5.0.0
 pypdf>=4.0.0
 gunicorn>=22.0.0
 jsonpath-ng>=1.6.0
+psycopg2-binary>=2.9.9
+

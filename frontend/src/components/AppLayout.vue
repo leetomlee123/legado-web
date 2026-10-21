@@ -31,9 +31,24 @@
         </router-link>
       </nav>
 
-      <!-- 底部装饰 -->
+      <!-- 底部用户信息与退出 -->
       <div class="sidebar-footer">
-        <div class="footer-text">Legado Web</div>
+        <div class="user-footer-card" @click="router.push('/settings')" title="前往个人与系统设置">
+          <div class="user-avatar-mini">
+            {{ (authStore.displayName || '用').slice(0, 1).toUpperCase() }}
+          </div>
+          <div class="user-footer-info">
+            <div class="user-footer-name">{{ authStore.displayName }}</div>
+            <div class="user-footer-role">{{ authStore.isAdmin ? '系统管理员' : '普通读者' }}</div>
+          </div>
+          <button class="logout-icon-btn" @click.stop="handleUserCommand('logout')" title="退出登录">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+              <polyline points="16 17 21 12 16 7"></polyline>
+              <line x1="21" y1="12" x2="9" y2="12"></line>
+            </svg>
+          </button>
+        </div>
       </div>
     </aside>
 
@@ -69,6 +84,30 @@
               <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
             </svg>
           </button>
+
+          <!-- 用户下拉菜单 -->
+          <el-dropdown trigger="click" @command="handleUserCommand">
+            <button class="user-action-btn" :title="`当前登录: ${authStore.displayName}`">
+              <div class="user-avatar-mini">
+                {{ (authStore.displayName || '用').slice(0, 1).toUpperCase() }}
+              </div>
+              <span class="user-name-text">{{ authStore.displayName }}</span>
+              <span v-if="authStore.isAdmin" class="user-role-badge">管理员</span>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="6 9 12 15 18 9"></polyline>
+              </svg>
+            </button>
+            <template #dropdown>
+              <el-dropdown-menu class="user-dropdown-menu">
+                <div class="dropdown-user-header">
+                  <div class="dropdown-username">{{ authStore.displayName }}</div>
+                  <div class="dropdown-role">{{ authStore.isAdmin ? '系统管理员' : '普通用户' }} (@{{ authStore.user?.username }})</div>
+                </div>
+                <el-dropdown-item command="settings">账号与系统设置</el-dropdown-item>
+                <el-dropdown-item divided command="logout" style="color: #f56c6c;">退出登录</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </div>
       </header>
       <main class="app-main">
@@ -95,10 +134,32 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { ElMessageBox, ElMessage } from 'element-plus'
+import { useAuthStore } from '@/stores/auth'
 
 const route = useRoute()
 const router = useRouter()
+const authStore = useAuthStore()
 const activePath = computed(() => route.path)
+
+async function handleUserCommand(cmd: string) {
+  if (cmd === 'settings') {
+    router.push('/settings')
+  } else if (cmd === 'logout') {
+    try {
+      await ElMessageBox.confirm('确定要退出当前登录账号吗？', '提示', {
+        confirmButtonText: '退出登录',
+        cancelButtonText: '取消',
+        type: 'warning',
+      })
+      await authStore.logout()
+      ElMessage.success('已安全退出登录')
+      router.push('/login')
+    } catch {
+      // cancelled
+    }
+  }
+}
 
 // ── PWA 安装提示 ──────────────────────────────────────────
 const deferredPrompt = ref<any>(null)
@@ -500,6 +561,132 @@ const navItems = [
   height: 4px;
   border-radius: 50%;
   background: var(--color-accent);
+}
+
+/* ─── 用户下拉与信息组件样式 ────────────────────────── */
+.user-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 4px 6px;
+  border-radius: 20px;
+  border: 1px solid rgba(200, 152, 58, 0.25);
+  background: rgba(200, 152, 58, 0.08);
+  color: var(--color-text-primary, #f5eedb);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-size: 13px;
+  user-select: none;
+}
+
+.user-action-btn:hover {
+  background: rgba(200, 152, 58, 0.16);
+  border-color: rgba(200, 152, 58, 0.45);
+}
+
+.user-avatar-mini {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #c8983a 0%, #8c601b 100%);
+  color: #17120e;
+  font-weight: 700;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.user-name-text {
+  font-weight: 500;
+  max-width: 100px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-role-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(200, 152, 58, 0.25);
+  color: #e0be75;
+  font-weight: 600;
+}
+
+.dropdown-user-header {
+  padding: 8px 16px 10px;
+  border-bottom: 1px solid var(--color-border, rgba(0, 0, 0, 0.06));
+  min-width: 150px;
+}
+
+.dropdown-username {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--color-text-primary, #333);
+}
+
+.dropdown-role {
+  font-size: 11px;
+  color: var(--color-text-secondary, #888);
+  margin-top: 2px;
+}
+
+.user-footer-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  width: 100%;
+}
+
+.user-footer-card:hover {
+  background: rgba(200, 152, 58, 0.1);
+  border-color: rgba(200, 152, 58, 0.2);
+}
+
+.user-footer-info {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+
+.user-footer-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(245, 238, 219, 0.9);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-footer-role {
+  font-size: 11px;
+  color: rgba(200, 152, 58, 0.8);
+}
+
+.logout-icon-btn {
+  border: none;
+  background: transparent;
+  color: rgba(245, 238, 219, 0.4);
+  padding: 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.logout-icon-btn:hover {
+  color: #ff7875;
+  background: rgba(255, 77, 79, 0.15);
 }
 
 /* ─── 移动端断点响应式适配 (<= 768px) ────────────────────────── */

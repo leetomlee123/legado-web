@@ -19,8 +19,23 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-from flask import Flask, Response, jsonify, request, send_file, send_from_directory
+from flask import Flask, Response, g, jsonify, request, send_file, send_from_directory
 
+from auth import (
+    authenticate,
+    change_password,
+    create_token,
+    create_user,
+    delete_user,
+    get_user_by_id,
+    has_users,
+    is_registration_allowed,
+    list_users,
+    revoke_token,
+    set_registration_allowed,
+    update_user_role,
+    verify_token,
+)
 from book import import_txt_file
 from db import data_dir, open_db, require_db, upload_dir
 from epub import import_epub_file
@@ -51,7 +66,7 @@ logger = get_logger("app")
 MAX_UPLOAD = 200 * 1024 * 1024
 UNSAFE_NAME = re.compile(r"[^\w.\-]", re.UNICODE)
 BOOK_COLS = (
-    "id, uuid, name, author, cover, intro, source_type, source_url, source_id, "
+    "id, user_id, uuid, name, author, cover, intro, source_type, source_url, source_id, "
     "local_path, book_group, in_bookcase, last_read_time, create_time, has_update"
 )
 
@@ -63,8 +78,60 @@ def write_msg(status: int, msg: str):
     return jsonify({"message": msg}), status
 
 
+@app.before_request
+def auth_middleware():
+    g.user = None
+    g.user_id = None
+
+    # 非 /api 路径（如静态资源、单页根路由）不拦截
+    if not request.path.startswith("/api"):
+        return None
+
+    # OPTIONS 预检请求直接放行
+    if request.method == "OPTIONS":
+        return None
+
+    # 白名单路由无需鉴权
+    public_paths = (
+        "/api/auth/login",
+        "/api/auth/register",
+        "/api/auth/status",
+        "/api/health",
+    )
+    if request.path in public_paths:
+        return None
+
+    # 书籍封面允许公开访问（保证 img 标签正常加载）
+    if re.match(r"^/api/books/[^/]+/cover$", request.path):
+        return None
+
+    # 提取并验证 Token（支持 Authorization 标头或 query 参数）
+    token = ""
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+    elif "token" in request.args:
+        token = request.args.get("token", "").strip()
+
+    if not token:
+        return write_msg(401, "请先登录")
+
+    user = verify_token(token)
+    if not user:
+        return write_msg(401, "登录已失效，请重新登录")
+
+    g.user = user
+    g.user_id = user["id"]
+
+    # 管理员路由保护
+    if request.path.startswith("/api/admin"):
+        if g.user.get("role") != "admin":
+            return write_msg(403, "权限不足，仅管理员可执行该操作")
+
+
 def book_json(row) -> dict:
     b = dict(row)
+    b["userId"] = b.get("user_id") or 1
     b["hasUpdate"] = b.get("has_update") or 0
     b["sourceType"] = b.get("source_type") or ""
     b["inBookcase"] = 1 if (b.get("in_bookcase") is None or b.get("in_bookcase") == 1) else 0
@@ -83,13 +150,25 @@ def book_json(row) -> dict:
     return b
 
 
-def get_book_by_id_or_uuid(identifier: str | int):
+def get_book_by_id_or_uuid(identifier: str | int, user_id: int | None = None):
     conn = require_db()
     s = str(identifier).strip()
-    if s.isdigit():
-        row = conn.execute(f"SELECT {BOOK_COLS} FROM book WHERE id=? OR uuid=?", (int(s), s)).fetchone()
+    if user_id is not None:
+        if s.isdigit():
+            row = conn.execute(
+                f"SELECT {BOOK_COLS} FROM book WHERE (id=? OR uuid=?) AND user_id=?",
+                (int(s), s, user_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                f"SELECT {BOOK_COLS} FROM book WHERE uuid=? AND user_id=?",
+                (s, user_id),
+            ).fetchone()
     else:
-        row = conn.execute(f"SELECT {BOOK_COLS} FROM book WHERE uuid=?", (s,)).fetchone()
+        if s.isdigit():
+            row = conn.execute(f"SELECT {BOOK_COLS} FROM book WHERE id=? OR uuid=?", (int(s), s)).fetchone()
+        else:
+            row = conn.execute(f"SELECT {BOOK_COLS} FROM book WHERE uuid=?", (s,)).fetchone()
     return row
 
 
@@ -145,6 +224,123 @@ def rule_string(raw) -> str:
     return json.dumps(raw, ensure_ascii=False)
 
 
+# ---------- healthcheck ----------
+
+
+@app.get("/api/health")
+def get_service_health():
+    """容器与反向代理健康检查端点。"""
+    return jsonify({"status": "ok"})
+
+
+# ---------- auth & users ----------
+
+
+@app.get("/api/auth/status")
+def get_auth_status():
+    """获取系统认证配置状态及当前登录用户。"""
+    return jsonify({
+        "hasUsers": has_users(),
+        "allowRegistration": is_registration_allowed(),
+        "loggedIn": bool(g.user),
+        "user": g.user,
+    })
+
+
+@app.post("/api/auth/register")
+def register_user():
+    """新用户注册。首个注册用户自动成为系统管理员。"""
+    body = request.get_json(silent=True) or {}
+    username = (body.get("username") or "").strip()
+    password = (body.get("password") or "").strip()
+    nickname = (body.get("nickname") or "").strip()
+
+    user, err = create_user(username, password, nickname)
+    if err:
+        return write_msg(400, err)
+
+    token = create_token(user["id"])
+    return jsonify({"token": token, "user": user, "message": "注册成功"})
+
+
+@app.post("/api/auth/login")
+def login_user():
+    """用户登录，校验凭据并签发 Token。"""
+    body = request.get_json(silent=True) or {}
+    username = (body.get("username") or "").strip()
+    password = (body.get("password") or "").strip()
+
+    user, err = authenticate(username, password)
+    if err:
+        return write_msg(400, err)
+
+    token = create_token(user["id"])
+    return jsonify({"token": token, "user": user, "message": "登录成功"})
+
+
+@app.post("/api/auth/logout")
+def logout_user():
+    """注销当前用户的 Token。"""
+    token = ""
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+    elif "token" in request.args:
+        token = request.args.get("token", "").strip()
+
+    if token:
+        revoke_token(token)
+    return jsonify({"ok": True, "message": "已退出登录"})
+
+
+@app.get("/api/auth/me")
+def get_current_user():
+    """获取当前登录用户信息。"""
+    return jsonify(g.user)
+
+
+@app.post("/api/auth/change-password")
+def change_user_password():
+    """修改当前用户登录密码。"""
+    body = request.get_json(silent=True) or {}
+    old_password = (body.get("oldPassword") or "").strip()
+    new_password = (body.get("newPassword") or "").strip()
+    if not old_password or not new_password:
+        return write_msg(400, "原密码和新密码均不能为空")
+
+    ok, msg = change_password(g.user_id, old_password, new_password)
+    if not ok:
+        return write_msg(400, msg)
+    return jsonify({"ok": True, "message": msg})
+
+
+# ---------- admin ----------
+
+
+@app.get("/api/admin/users")
+def admin_get_users():
+    """管理员获取系统所有用户列表。"""
+    return jsonify(list_users())
+
+
+@app.delete("/api/admin/users/<int:uid>")
+def admin_del_user(uid: int):
+    """管理员删除指定用户及其数据。"""
+    ok, msg = delete_user(uid, g.user_id)
+    if not ok:
+        return write_msg(400, msg)
+    return jsonify({"ok": True, "message": msg})
+
+
+@app.post("/api/admin/registration-toggle")
+def admin_set_registration():
+    """管理员开启或关闭新用户注册。"""
+    body = request.get_json(silent=True) or {}
+    allow = body.get("allow", True)
+    set_registration_allowed(allow)
+    return jsonify({"ok": True, "allowRegistration": is_registration_allowed()})
+
+
 # ---------- books ----------
 
 
@@ -155,8 +351,9 @@ def list_books():
     page = query_int("page", 0)
     size = query_int("size", 20) or 20
 
-    where = "WHERE (in_bookcase IS NULL OR in_bookcase = 1)"
-    args: list = []
+    user_id = g.user_id or 1
+    where = "WHERE (in_bookcase IS NULL OR in_bookcase = 1) AND user_id = ?"
+    args: list = [user_id]
     if keyword:
         where += " AND (name LIKE ? OR author LIKE ?)"
         like = f"%{keyword}%"
@@ -182,17 +379,18 @@ def batch_delete_books():
     if not identifiers:
         return jsonify({"ok": True, "count": 0})
 
+    user_id = g.user_id or 1
     conn = require_db()
     deleted = 0
     for ident in identifiers:
-        b = get_book_by_id(ident)
+        b = get_book_by_id(ident, user_id=user_id)
         if b is not None:
             if b["local_path"]:
                 try:
                     os.remove(b["local_path"])
                 except OSError:
                     pass
-            conn.execute("DELETE FROM book WHERE id=?", (b["id"],))
+            conn.execute("DELETE FROM book WHERE id=? AND user_id=?", (b["id"], user_id))
             deleted += 1
     conn.commit()
     return jsonify({"ok": True, "count": deleted})
@@ -200,7 +398,8 @@ def batch_delete_books():
 
 @app.get("/api/books/<identifier>")
 def get_book(identifier: str):
-    b = get_book_by_id(identifier)
+    user_id = g.user_id or 1
+    b = get_book_by_id(identifier, user_id=user_id)
     if b is None:
         return write_msg(404, "书籍不存在")
     return jsonify(book_json(b))
@@ -208,7 +407,8 @@ def get_book(identifier: str):
 
 @app.delete("/api/books/<identifier>")
 def delete_book(identifier: str):
-    b = get_book_by_id(identifier)
+    user_id = g.user_id or 1
+    b = get_book_by_id(identifier, user_id=user_id)
     if b is not None and b["local_path"]:
         try:
             os.remove(b["local_path"])
@@ -216,28 +416,30 @@ def delete_book(identifier: str):
             pass
     if b is not None:
         conn = require_db()
-        conn.execute("DELETE FROM book WHERE id=?", (b["id"],))
+        conn.execute("DELETE FROM book WHERE id=? AND user_id=?", (b["id"], user_id))
         conn.commit()
     return jsonify({"ok": True})
 
 
 @app.post("/api/books/<identifier>/add-to-shelf")
 def add_book_to_shelf(identifier: str):
-    b = get_book_by_id(identifier)
+    user_id = g.user_id or 1
+    b = get_book_by_id(identifier, user_id=user_id)
     if b is None:
         return write_msg(404, "书籍不存在")
     now = int(time.time() * 1000)
     conn = require_db()
-    conn.execute("UPDATE book SET in_bookcase=1, create_time=? WHERE id=?", (now, b["id"]))
+    conn.execute("UPDATE book SET in_bookcase=1, create_time=? WHERE id=? AND user_id=?", (now, b["id"], user_id))
     conn.commit()
-    saved = get_book_by_id(b["id"])
+    saved = get_book_by_id(b["id"], user_id=user_id)
     return jsonify(book_json(saved))
 
 
 @app.post("/api/books/<identifier>/change-source")
 def change_book_source(identifier: str):
     """为指定书籍切换书源，重新拉取目录并智能映射章节阅读进度。"""
-    row = get_book_by_id(identifier)
+    user_id = g.user_id or 1
+    row = get_book_by_id(identifier, user_id=user_id)
     if row is None:
         return write_msg(404, "书籍不存在")
     b = dict(row)
@@ -401,7 +603,8 @@ def change_book_source(identifier: str):
 
 @app.get("/api/books/<identifier>/chapters")
 def list_chapters(identifier: str):
-    b = get_book_by_id(identifier)
+    user_id = g.user_id or 1
+    b = get_book_by_id(identifier, user_id=user_id)
     if b is None:
         return write_msg(404, "书籍不存在")
     book_id = b["id"]
@@ -439,7 +642,8 @@ def list_chapters(identifier: str):
 
 @app.get("/api/books/<identifier>/chapters/<int:cid>/content")
 def get_chapter_content(identifier: str, cid: int):
-    b = get_book_by_id(identifier)
+    user_id = g.user_id or 1
+    b = get_book_by_id(identifier, user_id=user_id)
     if b is None:
         return write_msg(404, "书籍不存在")
     book_id = b["id"]
@@ -512,7 +716,8 @@ def get_chapter_content(identifier: str, cid: int):
 
 @app.get("/api/books/<identifier>/progress")
 def get_read_progress(identifier: str):
-    b = get_book_by_id(identifier)
+    user_id = g.user_id or 1
+    b = get_book_by_id(identifier, user_id=user_id)
     if b is None:
         return write_msg(404, "书籍不存在")
     book_id = b["id"]
@@ -534,7 +739,8 @@ def get_read_progress(identifier: str):
 
 @app.post("/api/books/<identifier>/progress")
 def save_read_progress(identifier: str):
-    b = get_book_by_id(identifier)
+    user_id = g.user_id or 1
+    b = get_book_by_id(identifier, user_id=user_id)
     if b is None:
         return write_msg(404, "书籍不存在")
     book_id = b["id"]
@@ -613,7 +819,8 @@ def get_cover(identifier: str):
 
 @app.get("/api/books/<identifier>/detail")
 def get_book_detail(identifier: str):
-    b = get_book_by_id(identifier)
+    user_id = g.user_id or 1
+    b = get_book_by_id(identifier, user_id=user_id)
     if b is None or (b["source_type"] or "") != "web":
         return write_msg(404, "非网络书")
     book_id = b["id"]
@@ -630,8 +837,8 @@ def get_book_detail(identifier: str):
     cover = detail.cover or b["cover"]
     conn = require_db()
     conn.execute(
-        "UPDATE book SET intro=?, author=?, cover=? WHERE id=?",
-        (intro, author, cover, book_id),
+        "UPDATE book SET intro=?, author=?, cover=? WHERE id=? AND user_id=?",
+        (intro, author, cover, book_id, user_id),
     )
     conn.commit()
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
@@ -662,33 +869,35 @@ def add_from_search():
     if not source_id:
         return write_msg(400, "缺少书源")
 
+    user_id = g.user_id or 1
     conn = require_db()
     # 优先根据 uuid 查找
     existing = None
     if uuid_val:
-        existing = conn.execute("SELECT id FROM book WHERE uuid=?", (uuid_val,)).fetchone()
+        existing = conn.execute("SELECT id, uuid FROM book WHERE uuid=? AND user_id=?", (uuid_val, user_id)).fetchone()
     if not existing:
         existing = conn.execute(
-            "SELECT id, uuid FROM book WHERE source_url=? AND source_id=?",
-            (book_url, source_id),
+            "SELECT id, uuid FROM book WHERE source_url=? AND source_id=? AND user_id=?",
+            (book_url, source_id, user_id),
         ).fetchone()
 
     if existing:
         book_id = int(existing["id"])
         # 如果已有记录但未设置 uuid，补充 uuid
         if uuid_val and not (existing["uuid"] if "uuid" in existing.keys() else ""):
-            conn.execute("UPDATE book SET uuid=? WHERE id=?", (uuid_val, book_id))
+            conn.execute("UPDATE book SET uuid=? WHERE id=? AND user_id=?", (uuid_val, book_id, user_id))
             conn.commit()
         if in_bookcase == 1:
-            conn.execute("UPDATE book SET in_bookcase=1 WHERE id=?", (book_id,))
+            conn.execute("UPDATE book SET in_bookcase=1 WHERE id=? AND user_id=?", (book_id, user_id))
             conn.commit()
-        return jsonify(book_json(get_book_by_id(book_id)))
+        return jsonify(book_json(get_book_by_id(book_id, user_id=user_id)))
 
     now = int(time.time() * 1000)
     cur = conn.execute(
-        "INSERT INTO book (uuid, name, author, cover, intro, source_type, source_url, source_id, in_bookcase, create_time) "
-        "VALUES (?, ?, ?, ?, ?, 'web', ?, ?, ?, ?)",
+        "INSERT INTO book (user_id, uuid, name, author, cover, intro, source_type, source_url, source_id, in_bookcase, create_time) "
+        "VALUES (?, ?, ?, ?, ?, ?, 'web', ?, ?, ?, ?)",
         (
+            user_id,
             uuid_val,
             name,
             body.get("author") or "",
@@ -701,7 +910,7 @@ def add_from_search():
         ),
     )
     conn.commit()
-    saved = get_book_by_id(int(cur.lastrowid))
+    saved = get_book_by_id(int(cur.lastrowid), user_id=user_id)
     if saved is None:
         return write_msg(500, "初始化书籍失败")
     return jsonify(book_json(saved))
@@ -827,14 +1036,13 @@ def preview_content():
 
 
 @app.post("/api/books/import/txt")
-
 def import_txt():
     try:
         path, orig = save_upload()
     except Exception:
         return write_msg(400, "未上传文件")
     try:
-        return jsonify(import_txt_file(path, orig))
+        return jsonify(import_txt_file(path, orig, user_id=g.user_id or 1))
     except Exception as e:
         return jsonify({"failed": 1, "message": str(e)}), 500
 
@@ -846,7 +1054,7 @@ def import_epub():
     except Exception:
         return write_msg(400, "未上传文件")
     try:
-        return jsonify(import_epub_file(path, orig))
+        return jsonify(import_epub_file(path, orig, user_id=g.user_id or 1))
     except Exception as e:
         return jsonify({"failed": 1, "message": str(e)}), 500
 
@@ -858,7 +1066,7 @@ def import_pdf():
     except Exception:
         return write_msg(400, "未上传文件")
     try:
-        return jsonify(import_pdf_file(path, orig))
+        return jsonify(import_pdf_file(path, orig, user_id=g.user_id or 1))
     except Exception as e:
         return jsonify({"failed": 1, "message": str(e)}), 500
 
@@ -1218,6 +1426,8 @@ def get_settings():
 
 @app.post("/api/settings")
 def update_settings():
+    if not g.user or g.user.get("role") != "admin":
+        return write_msg(403, "权限不足，仅管理员可修改系统配置")
     from settings import (
         get_raw_proxy,
         get_proxy,

@@ -50,12 +50,13 @@ def insert_book_and_chapters(
     source_type: str,
     local_path: str,
     chapters: list[dict],
+    user_id: int = 1,
 ) -> int:
     conn = require_db()
     now = int(__import__("time").time() * 1000)
     cur = conn.execute(
-        "INSERT INTO book (name, author, cover, source_type, local_path, create_time) VALUES (?, ?, ?, ?, ?, ?)",
-        (name, author, cover, source_type, local_path, now),
+        "INSERT INTO book (user_id, name, author, cover, source_type, local_path, create_time) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (user_id, name, author, cover, source_type, local_path, now),
     )
     book_id = int(cur.lastrowid)
     conn.executemany(
@@ -66,10 +67,10 @@ def insert_book_and_chapters(
     return book_id
 
 
-def import_txt_file(file_path: str, original_name: str) -> dict:
+def import_txt_file(file_path: str, original_name: str, user_id: int = 1) -> dict:
     raw = Path(file_path).read_bytes()
     text = decode_text(raw)
     name = Path(original_name).stem or Path(file_path).stem
     chapters = parse_chapters(text)
-    book_id = insert_book_and_chapters(name, "", "", "txt", file_path, chapters)
+    book_id = insert_book_and_chapters(name, "", "", "txt", file_path, chapters, user_id=user_id)
     return {"success": 1, "bookId": book_id, "chapterCount": len(chapters)}

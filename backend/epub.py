@@ -49,7 +49,7 @@ def _zip_entry(names: list[str], name: str) -> str | None:
     return None
 
 
-def import_epub_file(file_path: str, original_name: str) -> dict:
+def import_epub_file(file_path: str, original_name: str, user_id: int = 1) -> dict:
     try:
         zf = zipfile.ZipFile(file_path)
     except zipfile.BadZipFile as e:
@@ -135,7 +135,7 @@ def import_epub_file(file_path: str, original_name: str) -> dict:
         cover = str(PurePosixPath(opf_dir) / cover) if opf_dir else cover
         cover = str(PurePosixPath(cover))
 
-    book_id = insert_book_and_chapters(name, author, cover, "epub", file_path, chapters)
+    book_id = insert_book_and_chapters(name, author, cover, "epub", file_path, chapters, user_id=user_id)
     return {
         "success": 1,
         "bookId": book_id,

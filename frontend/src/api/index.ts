@@ -10,6 +10,7 @@ import type {
   ExploreSource,
   ExploreBook,
   ExploreItem,
+  User,
 } from '@/types'
 
 // 书架
@@ -263,8 +264,18 @@ export function searchStream(
     params.set('sourceIds', sourceIds.join(','))
   }
 
+  const token = localStorage.getItem('auth_token') || ''
+  if (token) {
+    params.set('token', token)
+  }
+  const headers: Record<string, string> = {}
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+
   fetch(`/api/search/stream?${params.toString()}`, {
     signal: controller.signal,
+    headers,
   })
     .then(async (response) => {
       if (!response.ok || !response.body) {
@@ -503,9 +514,16 @@ export function subscribeLogsStream(
   onError?: (err: any) => void
 ): () => void {
   const controller = new AbortController()
+  const token = localStorage.getItem('auth_token') || ''
+  const headers: Record<string, string> = {}
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+  const url = token ? `/api/logs/stream?token=${encodeURIComponent(token)}` : '/api/logs/stream'
 
-  fetch('/api/logs/stream', {
+  fetch(url, {
     signal: controller.signal,
+    headers,
   })
     .then(async (response) => {
       if (!response.ok || !response.body) {
@@ -565,4 +583,21 @@ export async function fetchExploreBooks(
   })
   return res as unknown as { books: ExploreBook[]; page: number; hasMore: boolean }
 }
+
+// ─── 管理员专用 API ──────────────────────────────────────────
+
+export async function listAdminUsers(): Promise<User[]> {
+  const res = await http.get('/admin/users')
+  return res as unknown as User[]
+}
+
+export async function deleteAdminUser(uid: number): Promise<void> {
+  await http.delete(`/admin/users/${uid}`)
+}
+
+export async function toggleAdminRegistration(allow: boolean): Promise<{ allowRegistration: boolean }> {
+  const res = await http.post('/admin/registration-toggle', { allow })
+  return res as unknown as { allowRegistration: boolean }
+}
+
 

@@ -1,5 +1,9 @@
 <template>
-  <div class="qidian-reader" :class="[`theme-${theme}`]" :style="readerStyleVars">
+  <div
+    class="qidian-reader"
+    :class="[`theme-${theme}`, { 'theme-green': theme === 'eye', 'theme-night': theme === 'night' }]"
+    :style="readerStyleVars"
+  >
     <!-- ── 右侧悬浮功能 Dock（起点经典右侧边栏）─────────────── -->
     <aside class="qidian-right-dock" role="toolbar" aria-label="阅读工具栏">
       <!-- 目录 -->
@@ -483,9 +487,9 @@
               <div class="setting-item-row">
                 <span class="setting-item-label">字体大小</span>
                 <div class="font-size-stepper">
-                  <button class="step-btn" aria-label="缩小字号" @click="fontSize = Math.max(14, fontSize - 1)">A-</button>
+                  <button class="step-btn" aria-label="缩小字号" @click="fontSize = Math.max(16, fontSize - 2)">A-</button>
                   <span class="step-value">{{ fontSize }}</span>
-                  <button class="step-btn" aria-label="增大字号" @click="fontSize = Math.min(28, fontSize + 1)">A+</button>
+                  <button class="step-btn" aria-label="增大字号" @click="fontSize = Math.min(28, fontSize + 2)">A+</button>
                 </div>
               </div>
 
@@ -811,6 +815,7 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import grainUrl from '@/assets/grain.png'
 import {
   getBook,
   listChapters,
@@ -1323,61 +1328,163 @@ function updateMediaSession() {
   } catch {}
 }
 
-// ── 起点风格主题配置（精准复刻起点官方阅读器背景色板）──
-type ThemeId = 'qidian' | 'cream' | 'eye' | 'blue' | 'pink' | 'white' | 'night'
-const THEMES: { id: ThemeId; label: string; swatchBg: string; canvasBg: string; pageBg: string; text: string }[] = [
-  { id: 'qidian', label: '经典纸白', swatchBg: '#fbf9f2', canvasBg: '#eae4d3', pageBg: '#fbf9f2', text: '#262626' },
-  { id: 'cream', label: '羊皮纸', swatchBg: '#f5edd8', canvasBg: '#e2d8c3', pageBg: '#f5edd8', text: '#33291f' },
-  { id: 'eye', label: '护眼绿', swatchBg: '#e1f0e2', canvasBg: '#cedecf', pageBg: '#e1f0e2', text: '#1a331d' },
-  { id: 'blue', label: '雅致蓝', swatchBg: '#e9eef2', canvasBg: '#d6dde3', pageBg: '#e9eef2', text: '#1c2830' },
-  { id: 'pink', label: '胭脂粉', swatchBg: '#f7eeed', canvasBg: '#ebdcdb', pageBg: '#f7eeed', text: '#331d20' },
-  { id: 'white', label: '纯净白', swatchBg: '#ffffff', canvasBg: '#ececec', pageBg: '#ffffff', text: '#222222' },
-  { id: 'night', label: '夜间黑', swatchBg: '#1c1c1f', canvasBg: '#121214', pageBg: '#1c1c1f', text: '#98989f' },
+// ── 起点风格主题配置（精准复刻起点官方阅读器背景色板与纸纹）──
+type ThemeId = 'qidian' | 'eye' | 'night' | 'cream' | 'blue' | 'pink' | 'white'
+interface ReaderTheme {
+  id: ThemeId
+  label: string
+  swatchBg: string
+  canvasBg: string
+  pageBg: string
+  text: string
+  textSoft: string
+  grain: number
+  shadow: string
+}
+
+const THEMES: ReaderTheme[] = [
+  {
+    id: 'qidian',
+    label: '起点纸白',
+    swatchBg: '#fbf6ea',
+    canvasBg: '#f3ead7',
+    pageBg: '#fbf6ea',
+    text: '#3b3428',
+    textSoft: '#8a7e68',
+    grain: 0.35,
+    shadow: '0 0 24px rgba(80, 60, 20, 0.08)',
+  },
+  {
+    id: 'eye',
+    label: '护眼豆沙',
+    swatchBg: '#e3f3e4',
+    canvasBg: '#cce8cf',
+    pageBg: '#e3f3e4',
+    text: '#243028',
+    textSoft: '#5d7264',
+    grain: 0.28,
+    shadow: '0 0 24px rgba(30, 70, 40, 0.06)',
+  },
+  {
+    id: 'night',
+    label: '夜间沉浸',
+    swatchBg: '#242424',
+    canvasBg: '#1c1c1c',
+    pageBg: '#242424',
+    text: '#c8c8c8',
+    textSoft: '#8a8a8a',
+    grain: 0.18,
+    shadow: '0 0 24px rgba(0, 0, 0, 0.4)',
+  },
+  {
+    id: 'cream',
+    label: '羊皮纸',
+    swatchBg: '#f6ecdc',
+    canvasBg: '#e8dcbe',
+    pageBg: '#f6ecdc',
+    text: '#382e21',
+    textSoft: '#82715c',
+    grain: 0.32,
+    shadow: '0 0 24px rgba(70, 50, 20, 0.08)',
+  },
+  {
+    id: 'blue',
+    label: '雅致蓝',
+    swatchBg: '#eaf0f5',
+    canvasBg: '#d0dae3',
+    pageBg: '#eaf0f5',
+    text: '#1c2833',
+    textSoft: '#5c6d7d',
+    grain: 0.25,
+    shadow: '0 0 24px rgba(30, 50, 70, 0.06)',
+  },
+  {
+    id: 'pink',
+    label: '胭脂粉',
+    swatchBg: '#faeef0',
+    canvasBg: '#ebd4d8',
+    pageBg: '#faeef0',
+    text: '#362226',
+    textSoft: '#805f65',
+    grain: 0.25,
+    shadow: '0 0 24px rgba(80, 40, 50, 0.06)',
+  },
+  {
+    id: 'white',
+    label: '纯净白',
+    swatchBg: '#ffffff',
+    canvasBg: '#edeef0',
+    pageBg: '#ffffff',
+    text: '#222222',
+    textSoft: '#787878',
+    grain: 0.15,
+    shadow: '0 0 24px rgba(0, 0, 0, 0.06)',
+  },
 ]
 
 const FONTS = [
-  { id: 'sans', label: '黑体' },
   { id: 'serif', label: '宋体' },
+  { id: 'sans', label: '黑体' },
   { id: 'kai', label: '楷体' },
 ]
 
 const FONT_MAP: Record<string, string> = {
-  sans: "'PingFang SC', 'Microsoft YaHei', 'Heiti SC', sans-serif",
-  serif: "'Noto Serif SC', 'Source Han Serif SC', 'STSong', 'SimSun', serif",
-  kai: "'KaiTi', 'STKaiti', 'FZKai-Z03S', serif",
+  serif: "'Source Han Serif SC', 'Songti SC', 'STSong', 'Noto Serif SC', 'SimSun', serif",
+  sans: "'PingFang SC', 'Microsoft YaHei', 'Heiti SC', 'Source Han Sans SC', sans-serif",
+  kai: "'KaiTi', 'STKaiti', 'FZKai-Z03S', 'Songti SC', serif",
 }
 
 const PAGE_WIDTHS = [
   { id: 'auto', label: '自动' },
   { id: '640', label: '640' },
   { id: '800', label: '800' },
+  { id: '840', label: '840' },
   { id: '900', label: '900' },
   { id: '1000', label: '1000' },
   { id: '1280', label: '1280' },
 ]
 
-// 读取本地持久化偏好
-const savedTheme = (localStorage.getItem('reader_theme') as ThemeId) || 'qidian'
-const theme = ref<ThemeId>(THEMES.some((t) => t.id === savedTheme) ? savedTheme : 'qidian')
-const fontSize = ref(Number(localStorage.getItem('reader_font_size')) || 18)
-const lineHeight = ref(Number(localStorage.getItem('reader_line_height')) || 1.9)
-const fontFamily = ref(localStorage.getItem('reader_font_family') || 'sans')
-const pageWidth = ref(localStorage.getItem('reader_page_width') || '800')
+// 读取本地持久化偏好（规范：未知主题回退到默认，不报错）
+const rawTheme = (localStorage.getItem('reader_theme') || localStorage.getItem('reader-theme') || 'qidian') as ThemeId
+const savedTheme = THEMES.some((t) => t.id === rawTheme) ? rawTheme : 'qidian'
+const theme = ref<ThemeId>(savedTheme)
+const storedFontSize = Number(localStorage.getItem('reader_font_size') || localStorage.getItem('reader-font-size'))
+const fontSize = ref(storedFontSize >= 16 && storedFontSize <= 28 ? storedFontSize : 18)
+const storedLineHeight = Number(localStorage.getItem('reader_line_height') || localStorage.getItem('reader-line-height'))
+const lineHeight = ref(storedLineHeight >= 1.4 && storedLineHeight <= 2.6 ? storedLineHeight : 1.9)
+const rawFontFamily = localStorage.getItem('reader_font_family') || localStorage.getItem('reader-font-family') || 'serif'
+const fontFamily = ref(FONT_MAP[rawFontFamily] ? rawFontFamily : 'serif')
+const pageWidth = ref(localStorage.getItem('reader_page_width') || localStorage.getItem('reader-page-width') || '840')
 
 watch(theme, (val) => {
-  try { localStorage.setItem('reader_theme', val) } catch {}
+  try {
+    localStorage.setItem('reader_theme', val)
+    localStorage.setItem('reader-theme', val)
+  } catch {}
 })
 watch(fontSize, (val) => {
-  try { localStorage.setItem('reader_font_size', String(val)) } catch {}
+  try {
+    localStorage.setItem('reader_font_size', String(val))
+    localStorage.setItem('reader-font-size', String(val))
+  } catch {}
 })
 watch(lineHeight, (val) => {
-  try { localStorage.setItem('reader_line_height', String(val)) } catch {}
+  try {
+    localStorage.setItem('reader_line_height', String(val))
+    localStorage.setItem('reader-line-height', String(val))
+  } catch {}
 })
 watch(fontFamily, (val) => {
-  try { localStorage.setItem('reader_font_family', val) } catch {}
+  try {
+    localStorage.setItem('reader_font_family', val)
+    localStorage.setItem('reader-font-family', val)
+  } catch {}
 })
 watch(pageWidth, (val) => {
-  try { localStorage.setItem('reader_page_width', val) } catch {}
+  try {
+    localStorage.setItem('reader_page_width', val)
+    localStorage.setItem('reader-page-width', val)
+  } catch {}
 })
 
 const pageMaxWidthStyle = computed(() => {
@@ -1387,26 +1494,39 @@ const pageMaxWidthStyle = computed(() => {
 
 const readerStyleVars = computed(() => {
   const currentTheme = THEMES.find((t) => t.id === theme.value) || THEMES[0]
-  const widthVal = pageWidth.value === 'auto' ? 800 : Number(pageWidth.value) || 800
+  const widthVal = pageWidth.value === 'auto' ? 840 : Number(pageWidth.value) || 840
   const dockLeftOffset = widthVal / 2 + 10
   return {
     '--qd-canvas-bg': currentTheme.canvasBg,
     '--qd-page-bg': currentTheme.pageBg,
     '--qd-text-color': currentTheme.text,
-    '--qd-font-family': FONT_MAP[fontFamily.value] || FONT_MAP.sans,
+    '--qd-text-soft': currentTheme.textSoft,
+    '--qd-grain': String(currentTheme.grain),
+    '--qd-shadow': currentTheme.shadow,
+    '--qd-grain-url': `url(${grainUrl})`,
+    '--qd-font-family': FONT_MAP[fontFamily.value] || FONT_MAP.serif,
     '--qd-font-size': `${fontSize.value}px`,
     '--qd-line-height': lineHeight.value,
     '--qd-dock-left': `calc(50% + ${dockLeftOffset}px)`,
+    // 对应设计说明标准令牌
+    '--page': currentTheme.canvasBg,
+    '--paper': currentTheme.pageBg,
+    '--ink': currentTheme.text,
+    '--ink-soft': currentTheme.textSoft,
+    '--grain': String(currentTheme.grain),
+    '--shadow': currentTheme.shadow,
   }
 })
 
 function toggleNightMode() {
   if (theme.value === 'night') {
-    const prev = (localStorage.getItem('reader_theme_prev') as ThemeId) || 'qidian'
-    theme.value = prev === 'night' ? 'qidian' : prev
+    const rawPrev = (localStorage.getItem('reader_theme_prev') || localStorage.getItem('reader-theme-prev') || 'qidian') as ThemeId
+    const prev = THEMES.some((t) => t.id === rawPrev && t.id !== 'night') ? rawPrev : 'qidian'
+    theme.value = prev
   } else {
     try {
       localStorage.setItem('reader_theme_prev', theme.value)
+      localStorage.setItem('reader-theme-prev', theme.value)
     } catch {}
     theme.value = 'night'
   }
@@ -1849,6 +1969,33 @@ onUnmounted(() => {
   font-family: var(--qd-font-family);
   transition: background-color 0.25s ease, color 0.25s ease;
   position: relative;
+  isolation: isolate;
+}
+
+.qidian-reader::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: var(--qd-grain-url);
+  background-repeat: repeat;
+  background-size: 128px 128px;
+  background-attachment: fixed;
+  opacity: var(--qd-grain, 0.35);
+  mix-blend-mode: multiply;
+  z-index: 0;
+}
+
+.theme-night.qidian-reader::before,
+.theme-night .qidian-reader::before {
+  mix-blend-mode: overlay;
+}
+
+@media (max-width: 640px) {
+  .qidian-reader::before {
+    background-attachment: scroll;
+    opacity: calc(var(--qd-grain, 0.35) * 0.5);
+  }
 }
 
 /* ─── 右侧起点经典悬浮 Dock ──────────────────────────────── */
@@ -1942,6 +2089,8 @@ onUnmounted(() => {
   padding: 40px 0 80px;
   display: flex;
   justify-content: center;
+  position: relative;
+  z-index: 1;
 }
 
 /* ─── 中央阅读主卡片（起点经典纸张质感与内边距）───────────── */
@@ -1949,15 +2098,17 @@ onUnmounted(() => {
   width: 100%;
   margin: 0 auto;
   background-color: var(--qd-page-bg);
-  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.08), 0 0 1px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--qd-shadow, 0 0 24px rgba(80, 60, 20, 0.08));
   border-radius: 2px;
   box-sizing: border-box;
-  padding: 56px 80px 80px;
-  transition: max-width 0.2s ease, background-color 0.25s ease;
+  padding: 48px 64px 80px;
+  transition: max-width 0.2s ease, background-color 0.25s ease, box-shadow 0.25s ease;
+  position: relative;
+  z-index: 1;
 }
 
 .theme-night .qidian-read-main {
-  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--qd-shadow, 0 0 24px rgba(0, 0, 0, 0.4));
 }
 
 .theme-night .qidian-right-dock {
@@ -1971,7 +2122,7 @@ onUnmounted(() => {
 
 .theme-night .chapter-meta-bar {
   border-bottom-color: rgba(255, 255, 255, 0.08);
-  color: #777;
+  color: var(--qd-text-soft, #8a8a8a);
 }
 
 .theme-night .chapter-bottom-nav {
@@ -1983,13 +2134,13 @@ onUnmounted(() => {
   border-color: rgba(255, 255, 255, 0.12);
 }
 
-@media (max-width: 768px) {
+@media (max-width: 640px) {
   .qidian-page-container {
     padding: 0 0 70px;
   }
 
   .qidian-read-main {
-    padding: 24px 18px 48px;
+    padding: 24px 20px 48px;
     margin-top: 0;
     box-shadow: none;
     border-radius: 0;
@@ -1998,12 +2149,12 @@ onUnmounted(() => {
 
 /* ─── 章节主标题与元数据 ─────────────────────────────────── */
 .chapter-main-title {
-  font-size: 26px;
-  font-weight: 700;
+  font-size: calc(var(--qd-font-size, 18px) * 1.4);
+  font-weight: 600;
   color: var(--qd-text-color);
   margin: 0 0 16px;
-  line-height: 1.35;
-  font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  line-height: 1.4;
+  font-family: inherit;
 }
 
 .chapter-meta-bar {
@@ -2014,7 +2165,7 @@ onUnmounted(() => {
   margin-bottom: 32px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
   font-size: 12px;
-  color: #888;
+  color: var(--qd-text-soft, #8a7e68);
   flex-wrap: wrap;
 }
 
@@ -2033,9 +2184,11 @@ onUnmounted(() => {
 
 .chapter-content-body :deep(p) {
   text-indent: 2em;
-  margin: 0 0 1.15em;
+  margin: 0 0 1em;
   text-align: justify;
+  text-justify: inter-ideograph;
   letter-spacing: 0.02em;
+  word-break: break-word;
 }
 
 /* ─── 底部章节翻页栏 ──────────────────────────────────────── */
@@ -3008,7 +3161,7 @@ onUnmounted(() => {
   }
 
   .qidian-read-main {
-    padding: 20px 16px 40px;
+    padding: 24px 20px 48px;
     box-shadow: none;
     border-radius: 0;
   }
@@ -3145,11 +3298,12 @@ onUnmounted(() => {
   text-align: justify;
   letter-spacing: 0.02em;
   cursor: pointer;
-  border-radius: 6px;
   padding: 4px 6px;
   margin-left: -6px;
   margin-right: -6px;
   transition: background 0.2s ease, box-shadow 0.2s ease;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
 }
 
 

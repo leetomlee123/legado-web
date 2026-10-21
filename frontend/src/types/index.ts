@@ -95,3 +95,19 @@ export interface ExploreBook {
   source_id: number
   source_name: string
 }
+
+export interface User {
+  id: number
+  username: string
+  nickname?: string
+  role: 'admin' | 'user'
+  create_time?: number
+}
+
+export interface AuthStatus {
+  hasUsers: boolean
+  allowRegistration: boolean
+  loggedIn: boolean
+  user?: User | null
+}
+

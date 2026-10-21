@@ -46,7 +46,62 @@ volumes:
 ```
 
 > [!TIP]
-> **日常数据备份**：如需迁移服务器或备份书架与书源，只需打包项目根目录下的 `./data` 文件夹即可完整迁移。
+> **日常数据备份**：如使用 SQLite，只需备份 `./data` 文件夹即可完整迁移。如使用 PostgreSQL，可通过 pg_dump 定时备份数据库。
+
+---
+
+## 三、数据库引擎选择（SQLite / PostgreSQL 双引擎）
+
+Legado Web 原生支持 **SQLite** 与 **PostgreSQL** 双数据库引擎：
+- **默认 SQLite**：无需安装或配置外部数据库，单机零依赖开箱即用（数据保存在 `./data/legado.db`）。
+- **PostgreSQL 模式**：只需配置 `DATABASE_URL` 或 `PG_*` 环境变量，服务会自动创建表结构并无缝切换至 PG。
+
+### 方式 1：连接已有 PostgreSQL 服务
+在 `docker-compose.yaml` 的 `environment` 中直接添加：
+```yaml
+environment:
+  - DATABASE_URL=postgresql://user:password@10.0.0.1:5432/legado
+```
+或者分立参数：
+```yaml
+environment:
+  - PG_HOST=postgres_host
+  - PG_PORT=5432
+  - PG_USER=legado
+  - PG_PASSWORD=secret
+  - PG_DATABASE=legado
+```
+
+### 方式 2：使用 Docker Compose 一键启动 PostgreSQL + Legado Web
+```yaml
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: legado
+      POSTGRES_PASSWORD: mysecretpassword
+      POSTGRES_DB: legado
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+
+  legado-web:
+    image: legado-web:latest
+    build: .
+    restart: unless-stopped
+    ports:
+      - "4388:4388"
+    depends_on:
+      - postgres
+    environment:
+      - DATABASE_URL=postgresql://legado:mysecretpassword@postgres:5432/legado
+      - LEGADO_DATA=/app/data
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+```
 
 ---
 

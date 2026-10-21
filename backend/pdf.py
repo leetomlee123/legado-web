@@ -8,7 +8,7 @@ from pypdf import PdfReader
 from book import insert_book_and_chapters, parse_chapters
 
 
-def import_pdf_file(file_path: str, original_name: str) -> dict:
+def import_pdf_file(file_path: str, original_name: str, user_id: int = 1) -> dict:
     try:
         reader = PdfReader(file_path)
     except Exception as e:
@@ -29,5 +29,5 @@ def import_pdf_file(file_path: str, original_name: str) -> dict:
     chapters = parse_chapters(text)
     if not chapters:
         raise ValueError("PDF 中没有可读取的章节")
-    book_id = insert_book_and_chapters(name, "", "", "pdf", file_path, chapters)
+    book_id = insert_book_and_chapters(name, "", "", "pdf", file_path, chapters, user_id=user_id)
     return {"success": 1, "bookId": book_id, "chapterCount": len(chapters)}

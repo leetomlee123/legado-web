@@ -1,8 +1,30 @@
 -- Legado Web 数据库 Schema (SQLite)
 
+-- 用户表
+CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT UNIQUE NOT NULL COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'user', -- 'admin' / 'user'
+    nickname      TEXT DEFAULT '',
+    create_time   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_user_username ON users (username);
+
+-- 用户令牌表
+CREATE TABLE IF NOT EXISTS user_tokens (
+    token       TEXT PRIMARY KEY,
+    user_id     INTEGER NOT NULL,
+    create_time INTEGER NOT NULL,
+    expire_time INTEGER NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_user_tokens_user_id ON user_tokens (user_id);
+
 -- 书籍表
 CREATE TABLE IF NOT EXISTS book (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       INTEGER DEFAULT 1,           -- 所属用户ID
     uuid          TEXT    DEFAULT '',          -- 前端预生成的 UUID，搜索结果坑位唯一标识
     name          TEXT    NOT NULL,
     author        TEXT    DEFAULT '',
@@ -21,7 +43,6 @@ CREATE TABLE IF NOT EXISTS book (
 CREATE INDEX IF NOT EXISTS idx_book_name ON book (name);
 CREATE INDEX IF NOT EXISTS idx_book_group ON book (book_group);
 
-
 -- 章节表
 CREATE TABLE IF NOT EXISTS chapter (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,7 +55,7 @@ CREATE TABLE IF NOT EXISTS chapter (
 );
 CREATE INDEX IF NOT EXISTS idx_chapter_book ON chapter (book_id, idx);
 
--- 书源表
+-- 书源表（全站共享）
 CREATE TABLE IF NOT EXISTS book_source (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     name         TEXT NOT NULL,

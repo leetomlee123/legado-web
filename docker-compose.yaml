@@ -20,7 +20,7 @@ services:
       - LEGADO_DATA=/app/data
       - TZ=Asia/Shanghai
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://127.0.0.1:4388/api/sources/health/status || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:4388/api/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
